@@ -121,7 +121,7 @@ func (s *StepTypeBootCommand) Run(_ context.Context, state multistep.StateBag) m
 func (*StepTypeBootCommand) Cleanup(multistep.StateBag) {}
 
 func scancodes(message string) []string {
-	// Scancodes reference: http://www.win.tue.nl/~aeb/linux/kbd/scancodes-1.html
+	// Scancodes reference: https://www.win.tue.nl/~aeb/linux/kbd/scancodes-10.html
 	//
 	// Scancodes represent raw keyboard output and are fed to the VM by the
 	// VBoxManage controlvm keyboardputscancode program.
@@ -144,6 +144,8 @@ func scancodes(message string) []string {
 	special["<f8>"] = []string{"42", "c2"}
 	special["<f9>"] = []string{"43", "c3"}
 	special["<f10>"] = []string{"44", "c4"}
+	special["<f11>"] = []string{"57", "d7"}
+	special["<f12>"] = []string{"58", "d8"}
 	special["<return>"] = []string{"1c", "9c"}
 	special["<tab>"] = []string{"0f", "8f"}
 	special["<up>"] = []string{"e048", "e0c8"}
@@ -228,6 +230,12 @@ func scancodes(message string) []string {
 			log.Printf("Sending char '%c', code '%v', shift %v", r, scancodeInt, keyShift)
 		}
 
+		if strings.HasPrefix(message, "<f12On>") {
+			scancode = append(scancode, "58")
+			message = message[len("<f12On>"):]
+			log.Printf("Special code '<f12On>', replacing with: 58")
+		}
+
 		if strings.HasPrefix(message, "<leftAltOn>") {
 			scancode = append(scancode, "38")
 			message = message[len("<leftAltOn>"):]
@@ -250,6 +258,12 @@ func scancodes(message string) []string {
 			scancode = append(scancode, "e05b")
 			message = message[len("<leftSuperOn>"):]
 			log.Printf("Special code '<leftSuperOn>' found, replacing with: e05b")
+		}
+
+		if strings.HasPrefix(message, "<f12Off>") {
+			scancode = append(scancode, "d8")
+			message = message[len("<f12Off>"):]
+			log.Printf("Special code '<f12Off>' found, replacing with: d8")
 		}
 
 		if strings.HasPrefix(message, "<leftAltOff>") {
