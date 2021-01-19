@@ -5,21 +5,20 @@ import (
 	"fmt"
 	"time"
 
-	"github.com/hashicorp/packer/helper/multistep"
-	"github.com/hashicorp/packer/packer"
+	"github.com/hashicorp/packer-plugin-sdk/multistep"
+	packersdk "github.com/hashicorp/packer-plugin-sdk/packer"
 )
 
 // This step runs the created virtual machine.
 //
 // Uses:
 //   driver Driver
-//   ui     packer.Ui
+//   ui     packersdk.Ui
 //   vmx_path string
 //
 // Produces:
 //   <nothing>
 type StepRun struct {
-	BootWait           time.Duration
 	DurationBeforeStop time.Duration
 	Headless           bool
 
@@ -27,9 +26,9 @@ type StepRun struct {
 	vmxPath  string
 }
 
-func (s *StepRun) Run(_ context.Context, state multistep.StateBag) multistep.StepAction {
+func (s *StepRun) Run(ctx context.Context, state multistep.StateBag) multistep.StepAction {
 	driver := state.Get("driver").(Driver)
-	ui := state.Get("ui").(packer.Ui)
+	ui := state.Get("ui").(packersdk.Ui)
 	vmxPath := state.Get("vmx_path").(string)
 
 	// Set the VMX path so that we know we started the machine
@@ -44,7 +43,7 @@ func (s *StepRun) Run(_ context.Context, state multistep.StateBag) multistep.Ste
 
 		if vncIpOk && vncPortOk && vncPasswordOk {
 			vncIp := vncIpRaw.(string)
-			vncPort := vncPortRaw.(uint)
+			vncPort := vncPortRaw.(int)
 			vncPassword := vncPasswordRaw.(string)
 
 			ui.Message(fmt.Sprintf(
@@ -65,30 +64,16 @@ func (s *StepRun) Run(_ context.Context, state multistep.StateBag) multistep.Ste
 		return multistep.ActionHalt
 	}
 
-	// Wait the wait amount
-	if int64(s.BootWait) > 0 {
-		ui.Say(fmt.Sprintf("Waiting %s for boot...", s.BootWait.String()))
-		wait := time.After(s.BootWait)
-	WAITLOOP:
-		for {
-			select {
-			case <-wait:
-				break WAITLOOP
-			case <-time.After(1 * time.Second):
-				if _, ok := state.GetOk(multistep.StateCancelled); ok {
-					return multistep.ActionHalt
-				}
-			}
-		}
-
-	}
+	// instance_id is the generic term used so that users can have access to the
+	// instance id inside of the provisioners, used in step_provision.
+	state.Put("instance_id", vmxPath)
 
 	return multistep.ActionContinue
 }
 
 func (s *StepRun) Cleanup(state multistep.StateBag) {
 	driver := state.Get("driver").(Driver)
-	ui := state.Get("ui").(packer.Ui)
+	ui := state.Get("ui").(packersdk.Ui)
 
 	// If we started the machine... stop it.
 	if s.vmxPath != "" {

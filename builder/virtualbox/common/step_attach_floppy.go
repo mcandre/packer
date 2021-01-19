@@ -4,20 +4,20 @@ import (
 	"context"
 	"fmt"
 	"io"
-	"io/ioutil"
 	"log"
 	"os"
 	"path/filepath"
 
-	"github.com/hashicorp/packer/helper/multistep"
-	"github.com/hashicorp/packer/packer"
+	"github.com/hashicorp/packer-plugin-sdk/multistep"
+	packersdk "github.com/hashicorp/packer-plugin-sdk/packer"
+	"github.com/hashicorp/packer-plugin-sdk/tmp"
 )
 
 // This step attaches the ISO to the virtual machine.
 //
 // Uses:
 //   driver Driver
-//   ui packer.Ui
+//   ui packersdk.Ui
 //   vmName string
 //
 // Produces:
@@ -25,7 +25,7 @@ type StepAttachFloppy struct {
 	floppyPath string
 }
 
-func (s *StepAttachFloppy) Run(_ context.Context, state multistep.StateBag) multistep.StepAction {
+func (s *StepAttachFloppy) Run(ctx context.Context, state multistep.StateBag) multistep.StepAction {
 	// Determine if we even have a floppy disk to attach
 	var floppyPath string
 	if floppyPathRaw, ok := state.GetOk("floppy_path"); ok {
@@ -45,8 +45,14 @@ func (s *StepAttachFloppy) Run(_ context.Context, state multistep.StateBag) mult
 	}
 
 	driver := state.Get("driver").(Driver)
-	ui := state.Get("ui").(packer.Ui)
+	ui := state.Get("ui").(packersdk.Ui)
 	vmName := state.Get("vmName").(string)
+
+	ui.Say("Deleting any current floppy disk...")
+	if err := driver.RemoveFloppyControllers(vmName); err != nil {
+		state.Put("error", fmt.Errorf("Error deleting existing floppy controllers: %s", err))
+		return multistep.ActionHalt
+	}
 
 	ui.Say("Attaching floppy disk...")
 
@@ -82,6 +88,8 @@ func (s *StepAttachFloppy) Run(_ context.Context, state multistep.StateBag) mult
 }
 
 func (s *StepAttachFloppy) Cleanup(state multistep.StateBag) {
+	ui := state.Get("ui").(packersdk.Ui)
+	ui.Say("Cleaning up floppy disk...")
 	if s.floppyPath == "" {
 		return
 	}
@@ -101,12 +109,13 @@ func (s *StepAttachFloppy) Cleanup(state multistep.StateBag) {
 	}
 
 	if err := driver.VBoxManage(command...); err != nil {
-		log.Printf("Error unregistering floppy: %s", err)
+		ui.Error(fmt.Sprintf("Error unregistering floppy: %s. "+
+			"Not considering this a critical failure; build will continue.", err))
 	}
 }
 
 func (s *StepAttachFloppy) copyFloppy(path string) (string, error) {
-	tempdir, err := ioutil.TempDir("", "packer")
+	tempdir, err := tmp.Dir("virtualbox")
 	if err != nil {
 		return "", err
 	}

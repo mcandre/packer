@@ -5,11 +5,13 @@ import (
 	"os"
 	"strings"
 	"testing"
+
+	packersdk "github.com/hashicorp/packer-plugin-sdk/packer"
 )
 
 // This reads the output from the bytes.Buffer in our test object
 // and then resets the buffer.
-func readWriter(ui *BasicUi) (result string) {
+func readWriter(ui *packersdk.BasicUi) (result string) {
 	buffer := ui.Writer.(*bytes.Buffer)
 	result = buffer.String()
 	buffer.Reset()
@@ -17,29 +19,39 @@ func readWriter(ui *BasicUi) (result string) {
 }
 
 // Reset the input Reader than add some input to it.
-func writeReader(ui *BasicUi, input string) {
+func writeReader(ui *packersdk.BasicUi, input string) {
 	buffer := ui.Reader.(*bytes.Buffer)
 	buffer.WriteString(input)
 }
 
-func readErrorWriter(ui *BasicUi) (result string) {
+func readErrorWriter(ui *packersdk.BasicUi) (result string) {
 	buffer := ui.ErrorWriter.(*bytes.Buffer)
 	result = buffer.String()
 	buffer.Reset()
 	return
 }
 
-func testUi() *BasicUi {
-	return &BasicUi{
+func testUi() *packersdk.BasicUi {
+	return &packersdk.BasicUi{
 		Reader:      new(bytes.Buffer),
 		Writer:      new(bytes.Buffer),
 		ErrorWriter: new(bytes.Buffer),
+		TTY:         new(testTTY),
 	}
+}
+
+type testTTY struct {
+	say string
+}
+
+func (tty *testTTY) Close() error { return nil }
+func (tty *testTTY) ReadString() (string, error) {
+	return tty.say, nil
 }
 
 func TestColoredUi(t *testing.T) {
 	bufferUi := testUi()
-	ui := &ColoredUi{UiColorYellow, UiColorRed, bufferUi}
+	ui := &ColoredUi{UiColorYellow, UiColorRed, bufferUi, &UiProgressBar{}}
 
 	if !ui.supportsColors() {
 		t.Skip("skipping for ui without color support")
@@ -71,7 +83,7 @@ func TestColoredUi(t *testing.T) {
 
 func TestColoredUi_noColorEnv(t *testing.T) {
 	bufferUi := testUi()
-	ui := &ColoredUi{UiColorYellow, UiColorRed, bufferUi}
+	ui := &ColoredUi{UiColorYellow, UiColorRed, bufferUi, &UiProgressBar{}}
 
 	// Set the env var to get rid of the color
 	oldenv := os.Getenv("PACKER_NO_COLOR")
@@ -99,34 +111,34 @@ func TestColoredUi_noColorEnv(t *testing.T) {
 
 func TestTargetedUI(t *testing.T) {
 	bufferUi := testUi()
-	targettedUi := &TargetedUI{
+	targetedUi := &TargetedUI{
 		Target: "foo",
 		Ui:     bufferUi,
 	}
 
 	var actual, expected string
-	targettedUi.Say("foo")
+	targetedUi.Say("foo")
 	actual = readWriter(bufferUi)
 	expected = "==> foo: foo\n"
 	if actual != expected {
 		t.Fatalf("bad: %#v", actual)
 	}
 
-	targettedUi.Message("foo")
+	targetedUi.Message("foo")
 	actual = readWriter(bufferUi)
 	expected = "    foo: foo\n"
 	if actual != expected {
 		t.Fatalf("bad: %#v", actual)
 	}
 
-	targettedUi.Error("bar")
+	targetedUi.Error("bar")
 	actual = readErrorWriter(bufferUi)
 	expected = "==> foo: bar\n"
 	if actual != expected {
 		t.Fatalf("bad: %#v", actual)
 	}
 
-	targettedUi.Say("foo\nbar")
+	targetedUi.Say("foo\nbar")
 	actual = readWriter(bufferUi)
 	expected = "==> foo: foo\n==> foo: bar\n"
 	if actual != expected {
@@ -137,7 +149,7 @@ func TestTargetedUI(t *testing.T) {
 func TestColoredUi_ImplUi(t *testing.T) {
 	var raw interface{}
 	raw = &ColoredUi{}
-	if _, ok := raw.(Ui); !ok {
+	if _, ok := raw.(packersdk.Ui); !ok {
 		t.Fatalf("ColoredUi must implement Ui")
 	}
 }
@@ -145,15 +157,15 @@ func TestColoredUi_ImplUi(t *testing.T) {
 func TestTargetedUI_ImplUi(t *testing.T) {
 	var raw interface{}
 	raw = &TargetedUI{}
-	if _, ok := raw.(Ui); !ok {
+	if _, ok := raw.(packersdk.Ui); !ok {
 		t.Fatalf("TargetedUI must implement Ui")
 	}
 }
 
 func TestBasicUi_ImplUi(t *testing.T) {
 	var raw interface{}
-	raw = &BasicUi{}
-	if _, ok := raw.(Ui); !ok {
+	raw = &packersdk.BasicUi{}
+	if _, ok := raw.(packersdk.Ui); !ok {
 		t.Fatalf("BasicUi must implement Ui")
 	}
 }
@@ -215,9 +227,9 @@ func TestBasicUi_Ask(t *testing.T) {
 	}
 
 	for _, testCase := range testCases {
-		// Because of the internal bufio we can't eaily reset the input, so create a new one each time
+		// Because of the internal bufio we can't easily reset the input, so create a new one each time
 		bufferUi := testUi()
-		writeReader(bufferUi, testCase.Input)
+		bufferUi.TTY = &testTTY{testCase.Input}
 
 		actual, err = bufferUi.Ask(testCase.Prompt)
 		if err != nil {
@@ -240,7 +252,7 @@ func TestBasicUi_Ask(t *testing.T) {
 func TestMachineReadableUi_ImplUi(t *testing.T) {
 	var raw interface{}
 	raw = &MachineReadableUi{}
-	if _, ok := raw.(Ui); !ok {
+	if _, ok := raw.(packersdk.Ui); !ok {
 		t.Fatalf("MachineReadableUi must implement Ui")
 	}
 }

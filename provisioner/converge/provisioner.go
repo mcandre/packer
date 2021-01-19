@@ -1,3 +1,5 @@
+//go:generate mapstructure-to-hcl2 -type Config,ModuleDir
+
 // This package implements a provisioner for Packer that executes
 // Converge to provision a remote machine
 
@@ -5,6 +7,7 @@ package converge
 
 import (
 	"bytes"
+	"context"
 	"errors"
 	"fmt"
 
@@ -12,10 +15,11 @@ import (
 
 	"encoding/json"
 
-	"github.com/hashicorp/packer/common"
-	"github.com/hashicorp/packer/helper/config"
-	"github.com/hashicorp/packer/packer"
-	"github.com/hashicorp/packer/template/interpolate"
+	"github.com/hashicorp/hcl/v2/hcldec"
+	"github.com/hashicorp/packer-plugin-sdk/common"
+	packersdk "github.com/hashicorp/packer-plugin-sdk/packer"
+	"github.com/hashicorp/packer-plugin-sdk/template/config"
+	"github.com/hashicorp/packer-plugin-sdk/template/interpolate"
 )
 
 // Config for Converge provisioner
@@ -53,11 +57,13 @@ type Provisioner struct {
 	config Config
 }
 
-// Prepare provisioner somehow. TODO: actual docs
+func (p *Provisioner) ConfigSpec() hcldec.ObjectSpec { return p.config.FlatMapstructure().HCL2Spec() }
+
 func (p *Provisioner) Prepare(raws ...interface{}) error {
 	err := config.Decode(
 		&p.config,
 		&config.DecodeOpts{
+			PluginType:         "converge",
 			Interpolate:        true,
 			InterpolateContext: &p.config.ctx,
 			InterpolateFilter: &interpolate.RenderFilter{
@@ -105,7 +111,7 @@ func (p *Provisioner) Prepare(raws ...interface{}) error {
 }
 
 // Provision node somehow. TODO: actual docs
-func (p *Provisioner) Provision(ui packer.Ui, comm packer.Communicator) error {
+func (p *Provisioner) Provision(ctx context.Context, ui packersdk.Ui, comm packersdk.Communicator, _ map[string]interface{}) error {
 	ui.Say("Provisioning with Converge")
 
 	// bootstrapping
@@ -126,7 +132,8 @@ func (p *Provisioner) Provision(ui packer.Ui, comm packer.Communicator) error {
 	return nil
 }
 
-func (p *Provisioner) maybeBootstrap(ui packer.Ui, comm packer.Communicator) error {
+func (p *Provisioner) maybeBootstrap(ui packersdk.Ui, comm packersdk.Communicator) error {
+	ctx := context.TODO()
 	if !p.config.Bootstrap {
 		return nil
 	}
@@ -145,19 +152,19 @@ func (p *Provisioner) maybeBootstrap(ui packer.Ui, comm packer.Communicator) err
 	}
 
 	var out, outErr bytes.Buffer
-	cmd := &packer.RemoteCmd{
+	cmd := &packersdk.RemoteCmd{
 		Command: command,
 		Stdin:   nil,
 		Stdout:  &out,
 		Stderr:  &outErr,
 	}
 
-	if err = comm.Start(cmd); err != nil {
+	if err = comm.Start(ctx, cmd); err != nil {
 		return fmt.Errorf("Error bootstrapping converge: %s", err)
 	}
 
 	cmd.Wait()
-	if cmd.ExitStatus != 0 {
+	if cmd.ExitStatus() != 0 {
 		ui.Error(out.String())
 		ui.Error(outErr.String())
 		return errors.New("Error bootstrapping converge")
@@ -167,7 +174,7 @@ func (p *Provisioner) maybeBootstrap(ui packer.Ui, comm packer.Communicator) err
 	return nil
 }
 
-func (p *Provisioner) sendModuleDirectories(ui packer.Ui, comm packer.Communicator) error {
+func (p *Provisioner) sendModuleDirectories(ui packersdk.Ui, comm packersdk.Communicator) error {
 	for _, dir := range p.config.ModuleDirs {
 		if err := comm.UploadDir(dir.Destination, dir.Source, dir.Exclude); err != nil {
 			return fmt.Errorf("Could not upload %q: %s", dir.Source, err)
@@ -178,7 +185,8 @@ func (p *Provisioner) sendModuleDirectories(ui packer.Ui, comm packer.Communicat
 	return nil
 }
 
-func (p *Provisioner) applyModules(ui packer.Ui, comm packer.Communicator) error {
+func (p *Provisioner) applyModules(ui packersdk.Ui, comm packersdk.Communicator) error {
+	ctx := context.TODO()
 	// create params JSON file
 	params, err := json.Marshal(p.config.Params)
 	if err != nil {
@@ -201,18 +209,18 @@ func (p *Provisioner) applyModules(ui packer.Ui, comm packer.Communicator) error
 
 	// run Converge in the specified directory
 	var runOut, runErr bytes.Buffer
-	cmd := &packer.RemoteCmd{
+	cmd := &packersdk.RemoteCmd{
 		Command: command,
 		Stdin:   nil,
 		Stdout:  &runOut,
 		Stderr:  &runErr,
 	}
-	if err := comm.Start(cmd); err != nil {
+	if err := comm.Start(ctx, cmd); err != nil {
 		return fmt.Errorf("Error applying %q: %s", p.config.Module, err)
 	}
 
 	cmd.Wait()
-	if cmd.ExitStatus == 127 {
+	if cmd.ExitStatus() == 127 {
 		ui.Error("Could not find Converge. Is it installed and in PATH?")
 		if !p.config.Bootstrap {
 			ui.Error("Bootstrapping was disabled for this run. That might be why Converge isn't present.")
@@ -220,20 +228,14 @@ func (p *Provisioner) applyModules(ui packer.Ui, comm packer.Communicator) error
 
 		return errors.New("Could not find Converge")
 
-	} else if cmd.ExitStatus != 0 {
+	} else if cmd.ExitStatus() != 0 {
 		ui.Error(strings.TrimSpace(runOut.String()))
 		ui.Error(strings.TrimSpace(runErr.String()))
-		ui.Error(fmt.Sprintf("Exited with error code %d.", cmd.ExitStatus))
+		ui.Error(fmt.Sprintf("Exited with error code %d.", cmd.ExitStatus()))
 		return fmt.Errorf("Error applying %q", p.config.Module)
 	}
 
 	ui.Message(strings.TrimSpace(runOut.String()))
 
 	return nil
-}
-
-// Cancel the provisioning process
-func (p *Provisioner) Cancel() {
-	// there's not an awful lot we can do to cancel Converge at the moment.
-	// The default semantics are fine.
 }

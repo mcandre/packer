@@ -4,10 +4,11 @@ import (
 	"context"
 	"fmt"
 	"log"
+	"time"
 
-	"github.com/hashicorp/packer/common"
-	"github.com/hashicorp/packer/helper/multistep"
-	"github.com/hashicorp/packer/packer"
+	"github.com/hashicorp/packer-plugin-sdk/multistep"
+	packersdk "github.com/hashicorp/packer-plugin-sdk/packer"
+	"github.com/hashicorp/packer-plugin-sdk/retry"
 )
 
 // This step removes any devices (floppy disks, ISOs, etc.) from the
@@ -15,15 +16,17 @@ import (
 //
 // Uses:
 //   driver Driver
-//   ui packer.Ui
+//   ui packersdk.Ui
 //   vmName string
 //
 // Produces:
-type StepRemoveDevices struct{}
+type StepRemoveDevices struct {
+	Bundling VBoxBundleConfig
+}
 
-func (s *StepRemoveDevices) Run(_ context.Context, state multistep.StateBag) multistep.StepAction {
+func (s *StepRemoveDevices) Run(ctx context.Context, state multistep.StateBag) multistep.StepAction {
 	driver := state.Get("driver").(Driver)
-	ui := state.Get("ui").(packer.Ui)
+	ui := state.Get("ui").(packersdk.Ui)
 	vmName := state.Get("vmName").(string)
 
 	// Remove the attached floppy disk, if it exists
@@ -43,50 +46,48 @@ func (s *StepRemoveDevices) Run(_ context.Context, state multistep.StateBag) mul
 			return multistep.ActionHalt
 		}
 
-		var vboxErr error
 		// Retry for 10 minutes to remove the floppy controller.
 		log.Printf("Trying for 10 minutes to remove floppy controller.")
-		err := common.Retry(15, 15, 40, func(_ uint) (bool, error) {
+		err := retry.Config{
+			Tries:      40,
+			RetryDelay: (&retry.Backoff{InitialBackoff: 15 * time.Second, MaxBackoff: 15 * time.Second, Multiplier: 2}).Linear,
+		}.Run(ctx, func(ctx context.Context) error {
 			// Don't forget to remove the floppy controller as well
 			command = []string{
 				"storagectl", vmName,
 				"--name", "Floppy Controller",
 				"--remove",
 			}
-			vboxErr = driver.VBoxManage(command...)
-			if vboxErr != nil {
+			err := driver.VBoxManage(command...)
+			if err != nil {
 				log.Printf("Error removing floppy controller. Retrying.")
-				return false, nil
 			}
-			return true, nil
+			return err
 		})
-		if err == common.RetryExhaustedError {
-			err := fmt.Errorf("Error removing floppy controller: %s", vboxErr)
+		if err != nil {
+			err := fmt.Errorf("Error removing floppy controller: %s", err)
 			state.Put("error", err)
 			ui.Error(err.Error())
 			return multistep.ActionHalt
 		}
 	}
 
-	if _, ok := state.GetOk("attachedIso"); ok {
-		controllerName := "IDE Controller"
-		port := "0"
-		device := "1"
-		if _, ok := state.GetOk("attachedIsoOnSata"); ok {
-			controllerName = "SATA Controller"
-			port = "1"
-			device = "0"
+	var isoUnmountCommands map[string][]string
+	isoUnmountCommandsRaw, ok := state.GetOk("disk_unmount_commands")
+	if !ok {
+		// No disks to unmount
+		return multistep.ActionContinue
+	} else {
+		isoUnmountCommands = isoUnmountCommandsRaw.(map[string][]string)
+	}
+
+	for diskCategory, unmountCommand := range isoUnmountCommands {
+		if diskCategory == "boot_iso" && s.Bundling.BundleISO {
+			// skip the unmount if user wants to bundle the iso
+			continue
 		}
 
-		command := []string{
-			"storageattach", vmName,
-			"--storagectl", controllerName,
-			"--port", port,
-			"--device", device,
-			"--medium", "none",
-		}
-
-		if err := driver.VBoxManage(command...); err != nil {
+		if err := driver.VBoxManage(unmountCommand...); err != nil {
 			err := fmt.Errorf("Error detaching ISO: %s", err)
 			state.Put("error", err)
 			ui.Error(err.Error())
@@ -94,22 +95,9 @@ func (s *StepRemoveDevices) Run(_ context.Context, state multistep.StateBag) mul
 		}
 	}
 
-	if _, ok := state.GetOk("guest_additions_attached"); ok {
-		ui.Message("Removing guest additions drive...")
-		command := []string{
-			"storageattach", vmName,
-			"--storagectl", "IDE Controller",
-			"--port", "1",
-			"--device", "0",
-			"--medium", "none",
-		}
-		if err := driver.VBoxManage(command...); err != nil {
-			err := fmt.Errorf("Error removing guest additions: %s", err)
-			state.Put("error", err)
-			ui.Error(err.Error())
-			return multistep.ActionHalt
-		}
-	}
+	// log that we removed the isos, so we don't waste time trying to do it
+	// in the step_attach_isos cleanup.
+	state.Put("detached_isos", true)
 
 	return multistep.ActionContinue
 }

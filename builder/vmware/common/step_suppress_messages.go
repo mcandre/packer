@@ -5,16 +5,16 @@ import (
 	"fmt"
 	"log"
 
-	"github.com/hashicorp/packer/helper/multistep"
-	"github.com/hashicorp/packer/packer"
+	"github.com/hashicorp/packer-plugin-sdk/multistep"
+	packersdk "github.com/hashicorp/packer-plugin-sdk/packer"
 )
 
 // This step suppresses any messages that VMware product might show.
 type StepSuppressMessages struct{}
 
-func (s *StepSuppressMessages) Run(_ context.Context, state multistep.StateBag) multistep.StepAction {
+func (s *StepSuppressMessages) Run(ctx context.Context, state multistep.StateBag) multistep.StepAction {
 	driver := state.Get("driver").(Driver)
-	ui := state.Get("ui").(packer.Ui)
+	ui := state.Get("ui").(packersdk.Ui)
 	vmxPath := state.Get("vmx_path").(string)
 
 	log.Println("Suppressing messages in VMX")

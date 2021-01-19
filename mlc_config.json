@@ -1,0 +1,45 @@
+{
+   "ignorePatterns": [
+    {
+      "pattern": "^https://example.com"
+    },
+    {
+      "pattern": "^https://ec2.custom.endpoint.com"
+    },
+    {
+      "pattern": "^https://www.linode.com"
+    },
+    {
+      "pattern": "^https://github.com/hashicorp/packer-plugin-scaffolding"
+    },
+    {
+      "pattern": "^https://www.packer.io/docs/templates/hcl_templates/"
+    },
+    {
+      "pattern": "^https://packer.io/docs/templates/hcl_templates/"
+    },
+    {
+      "pattern": "^/docs/templates/hcl_templates/"
+    },
+    {
+      "pattern": "^/docs/datasources"
+    },
+    {
+      "pattern": "^/docs/extending/custom-datasources"
+    },
+    {
+      "pattern": "^/docs/templates/legacy_json_templates"
+    },
+    {
+      "pattern": "^https://packer.io/docs/templates/legacy_json_templates"
+    }
+  ],
+  "replacementPatterns": [
+    {
+      "pattern": "^/",
+      "replacement": "https://packer.io/"
+    }
+  ],
+  "timeout": "20s",
+  "retryOn429": true
+}

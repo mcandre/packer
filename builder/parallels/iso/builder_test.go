@@ -5,26 +5,26 @@ import (
 	"reflect"
 	"testing"
 
-	"github.com/hashicorp/packer/packer"
+	"github.com/hashicorp/packer-plugin-sdk/common"
+	packersdk "github.com/hashicorp/packer-plugin-sdk/packer"
 )
 
 func testConfig() map[string]interface{} {
 	return map[string]interface{}{
-		"iso_checksum":           "foo",
-		"iso_checksum_type":      "md5",
+		"iso_checksum":           "md5:0B0F137F17AC10944716020B018F8126",
 		"iso_url":                "http://www.google.com/",
 		"shutdown_command":       "yes",
 		"ssh_username":           "foo",
 		"parallels_tools_flavor": "lin",
 
-		packer.BuildNameConfigKey: "foo",
+		common.BuildNameConfigKey: "foo",
 	}
 }
 
 func TestBuilder_ImplementsBuilder(t *testing.T) {
 	var raw interface{}
 	raw = &Builder{}
-	if _, ok := raw.(packer.Builder); !ok {
+	if _, ok := raw.(packersdk.Builder); !ok {
 		t.Error("Builder must implement builder.")
 	}
 }
@@ -32,7 +32,7 @@ func TestBuilder_ImplementsBuilder(t *testing.T) {
 func TestBuilderPrepare_Defaults(t *testing.T) {
 	var b Builder
 	config := testConfig()
-	warns, err := b.Prepare(config)
+	_, warns, err := b.Prepare(config)
 	if len(warns) > 0 {
 		t.Fatalf("bad: %#v", warns)
 	}
@@ -54,7 +54,7 @@ func TestBuilderPrepare_FloppyFiles(t *testing.T) {
 	config := testConfig()
 
 	delete(config, "floppy_files")
-	warns, err := b.Prepare(config)
+	_, warns, err := b.Prepare(config)
 	if len(warns) > 0 {
 		t.Fatalf("bad: %#v", warns)
 	}
@@ -66,10 +66,10 @@ func TestBuilderPrepare_FloppyFiles(t *testing.T) {
 		t.Fatalf("bad: %#v", b.config.FloppyFiles)
 	}
 
-	floppies_path := "../../../common/test-fixtures/floppies"
+	floppies_path := "../../test-fixtures/floppies"
 	config["floppy_files"] = []string{fmt.Sprintf("%s/bar.bat", floppies_path), fmt.Sprintf("%s/foo.ps1", floppies_path)}
 	b = Builder{}
-	warns, err = b.Prepare(config)
+	_, warns, err = b.Prepare(config)
 	if len(warns) > 0 {
 		t.Fatalf("bad: %#v", warns)
 	}
@@ -86,14 +86,14 @@ func TestBuilderPrepare_FloppyFiles(t *testing.T) {
 func TestBuilderPrepare_InvalidFloppies(t *testing.T) {
 	var b Builder
 	config := testConfig()
-	config["floppy_files"] = []string{"nonexistant.bat", "nonexistant.ps1"}
+	config["floppy_files"] = []string{"nonexistent.bat", "nonexistent.ps1"}
 	b = Builder{}
-	_, errs := b.Prepare(config)
+	_, _, errs := b.Prepare(config)
 	if errs == nil {
 		t.Fatalf("Nonexistent floppies should trigger multierror")
 	}
 
-	if len(errs.(*packer.MultiError).Errors) != 2 {
+	if len(errs.(*packersdk.MultiError).Errors) != 2 {
 		t.Fatalf("Multierror should work and report 2 errors")
 	}
 }
@@ -103,7 +103,7 @@ func TestBuilderPrepare_DiskSize(t *testing.T) {
 	config := testConfig()
 
 	delete(config, "disk_size")
-	warns, err := b.Prepare(config)
+	_, warns, err := b.Prepare(config)
 	if len(warns) > 0 {
 		t.Fatalf("bad: %#v", warns)
 	}
@@ -117,7 +117,7 @@ func TestBuilderPrepare_DiskSize(t *testing.T) {
 
 	config["disk_size"] = 60000
 	b = Builder{}
-	warns, err = b.Prepare(config)
+	_, warns, err = b.Prepare(config)
 	if len(warns) > 0 {
 		t.Fatalf("bad: %#v", warns)
 	}
@@ -136,7 +136,7 @@ func TestBuilderPrepare_DiskType(t *testing.T) {
 
 	// Test a default disk_type
 	delete(config, "disk_type")
-	warns, err := b.Prepare(config)
+	_, warns, err := b.Prepare(config)
 	if len(warns) > 0 {
 		t.Fatalf("bad: %#v", warns)
 	}
@@ -151,7 +151,7 @@ func TestBuilderPrepare_DiskType(t *testing.T) {
 	// Test with a bad
 	config["disk_type"] = "fake"
 	b = Builder{}
-	warns, err = b.Prepare(config)
+	_, warns, err = b.Prepare(config)
 	if len(warns) > 0 {
 		t.Fatalf("bad: %#v", warns)
 	}
@@ -163,7 +163,7 @@ func TestBuilderPrepare_DiskType(t *testing.T) {
 	config["disk_type"] = "plain"
 	config["skip_compaction"] = false
 	b = Builder{}
-	warns, err = b.Prepare(config)
+	_, warns, err = b.Prepare(config)
 	if len(warns) == 0 {
 		t.Fatalf("should have warning")
 	}
@@ -175,7 +175,7 @@ func TestBuilderPrepare_DiskType(t *testing.T) {
 	config["disk_type"] = "plain"
 	config["skip_compaction"] = true
 	b = Builder{}
-	warns, err = b.Prepare(config)
+	_, warns, err = b.Prepare(config)
 	if len(warns) > 0 {
 		t.Fatalf("bad: %#v", warns)
 	}
@@ -191,7 +191,7 @@ func TestBuilderPrepare_HardDriveInterface(t *testing.T) {
 
 	// Test a default boot_wait
 	delete(config, "hard_drive_interface")
-	warns, err := b.Prepare(config)
+	_, warns, err := b.Prepare(config)
 	if len(warns) > 0 {
 		t.Fatalf("bad: %#v", warns)
 	}
@@ -206,7 +206,7 @@ func TestBuilderPrepare_HardDriveInterface(t *testing.T) {
 	// Test with a bad
 	config["hard_drive_interface"] = "fake"
 	b = Builder{}
-	warns, err = b.Prepare(config)
+	_, warns, err = b.Prepare(config)
 	if len(warns) > 0 {
 		t.Fatalf("bad: %#v", warns)
 	}
@@ -217,7 +217,7 @@ func TestBuilderPrepare_HardDriveInterface(t *testing.T) {
 	// Test with a good
 	config["hard_drive_interface"] = "scsi"
 	b = Builder{}
-	warns, err = b.Prepare(config)
+	_, warns, err = b.Prepare(config)
 	if len(warns) > 0 {
 		t.Fatalf("bad: %#v", warns)
 	}
@@ -232,7 +232,7 @@ func TestBuilderPrepare_InvalidKey(t *testing.T) {
 
 	// Add a random key
 	config["i_should_not_be_valid"] = true
-	warns, err := b.Prepare(config)
+	_, warns, err := b.Prepare(config)
 	if len(warns) > 0 {
 		t.Fatalf("bad: %#v", warns)
 	}

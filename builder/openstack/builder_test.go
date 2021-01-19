@@ -3,25 +3,13 @@ package openstack
 import (
 	"testing"
 
-	"github.com/hashicorp/packer/packer"
+	packersdk "github.com/hashicorp/packer-plugin-sdk/packer"
 )
-
-func testConfig() map[string]interface{} {
-	return map[string]interface{}{
-		"username":     "foo",
-		"password":     "bar",
-		"region":       "DFW",
-		"image_name":   "foo",
-		"source_image": "foo",
-		"flavor":       "foo",
-		"ssh_username": "root",
-	}
-}
 
 func TestBuilder_ImplementsBuilder(t *testing.T) {
 	var raw interface{}
 	raw = &Builder{}
-	if _, ok := raw.(packer.Builder); !ok {
+	if _, ok := raw.(packersdk.Builder); !ok {
 		t.Fatalf("Builder should be a builder")
 	}
 }
@@ -32,7 +20,7 @@ func TestBuilder_Prepare_BadType(t *testing.T) {
 		"password": []string{},
 	}
 
-	warns, err := b.Prepare(c)
+	_, warns, err := b.Prepare(c)
 	if len(warns) > 0 {
 		t.Fatalf("bad: %#v", warns)
 	}

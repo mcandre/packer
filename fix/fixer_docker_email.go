@@ -4,11 +4,23 @@ import "github.com/mitchellh/mapstructure"
 
 type FixerDockerEmail struct{}
 
+func (FixerDockerEmail) DeprecatedOptions() map[string][]string {
+	return map[string][]string{
+		"packer.docker":                       []string{"login_email"},
+		"packer.post-processor.docker-import": []string{"login_email"},
+	}
+
+}
+
 func (FixerDockerEmail) Fix(input map[string]interface{}) (map[string]interface{}, error) {
+	if input["post-processors"] == nil {
+		return input, nil
+	}
+
 	// Our template type we'll use for this fixer only
 	type template struct {
-		Builders       []map[string]interface{}
-		PostProcessors []map[string]interface{} `mapstructure:"post-processors"`
+		Builders []map[string]interface{}
+		PP       `mapstructure:",squash"`
 	}
 
 	// Decode the input into our structure, if we can
@@ -27,7 +39,9 @@ func (FixerDockerEmail) Fix(input map[string]interface{}) (map[string]interface{
 	}
 
 	// Go through each post-processor and delete `docker_login` if present
-	for _, pp := range tpl.PostProcessors {
+	pps := tpl.ppList()
+
+	for _, pp := range pps {
 		_, ok := pp["login_email"]
 		if !ok {
 			continue

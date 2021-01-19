@@ -1,8 +1,8 @@
 package template
 
 import (
-	"github.com/Azure/azure-sdk-for-go/arm/compute"
-	"github.com/Azure/azure-sdk-for-go/arm/network"
+	"github.com/Azure/azure-sdk-for-go/services/compute/mgmt/2018-04-01/compute"
+	"github.com/Azure/azure-sdk-for-go/services/network/mgmt/2018-01-01/network"
 )
 
 /////////////////////////////////////////////////
@@ -12,7 +12,7 @@ type Template struct {
 	ContentVersion *string                `json:"contentVersion"`
 	Parameters     *map[string]Parameters `json:"parameters"`
 	Variables      *map[string]string     `json:"variables"`
-	Resources      *[]Resource            `json:"resources"`
+	Resources      []*Resource            `json:"resources"`
 }
 
 /////////////////////////////////////////////////
@@ -25,14 +25,23 @@ type Parameters struct {
 /////////////////////////////////////////////////
 // Template > Resource
 type Resource struct {
-	ApiVersion *string             `json:"apiVersion"`
-	Name       *string             `json:"name"`
-	Type       *string             `json:"type"`
-	Location   *string             `json:"location,omitempty"`
-	DependsOn  *[]string           `json:"dependsOn,omitempty"`
-	Properties *Properties         `json:"properties,omitempty"`
-	Tags       *map[string]*string `json:"tags,omitempty"`
-	Resources  *[]Resource         `json:"resources,omitempty"`
+	ApiVersion *string            `json:"apiVersion"`
+	Name       *string            `json:"name"`
+	Type       *string            `json:"type"`
+	Location   *string            `json:"location,omitempty"`
+	DependsOn  *[]string          `json:"dependsOn,omitempty"`
+	Plan       *Plan              `json:"plan,omitempty"`
+	Properties *Properties        `json:"properties,omitempty"`
+	Tags       *map[string]string `json:"tags,omitempty"`
+	Resources  *[]Resource        `json:"resources,omitempty"`
+	Identity   *Identity          `json:"identity,omitempty"`
+}
+
+type Plan struct {
+	Name          *string `json:"name"`
+	Product       *string `json:"product"`
+	Publisher     *string `json:"publisher"`
+	PromotionCode *string `json:"promotionCode,omitempty"`
 }
 
 type OSDiskUnion struct {
@@ -48,10 +57,23 @@ type OSDiskUnion struct {
 	ManagedDisk  *compute.ManagedDiskParameters    `json:"managedDisk,omitempty"`
 }
 
+type DataDiskUnion struct {
+	Lun          *int                           `json:"lun,omitempty"`
+	BlobURI      *string                        `json:"blobUri,omitempty"`
+	Name         *string                        `json:"name,omitempty"`
+	Vhd          *compute.VirtualHardDisk       `json:"vhd,omitempty"`
+	Image        *compute.VirtualHardDisk       `json:"image,omitempty"`
+	Caching      compute.CachingTypes           `json:"caching,omitempty"`
+	CreateOption compute.DiskCreateOptionTypes  `json:"createOption,omitempty"`
+	DiskSizeGB   *int32                         `json:"diskSizeGB,omitempty"`
+	ManagedDisk  *compute.ManagedDiskParameters `json:"managedDisk,omitempty"`
+}
+
 // Union of the StorageProfile and ImageStorageProfile types.
 type StorageProfileUnion struct {
 	ImageReference *compute.ImageReference `json:"imageReference,omitempty"`
 	OsDisk         *OSDiskUnion            `json:"osDisk,omitempty"`
+	DataDisks      *[]DataDiskUnion        `json:"dataDisks,omitempty"`
 }
 
 /////////////////////////////////////////////////
@@ -63,6 +85,7 @@ type Properties struct {
 	DNSSettings                  *network.PublicIPAddressDNSSettings `json:"dnsSettings,omitempty"`
 	EnabledForDeployment         *string                             `json:"enabledForDeployment,omitempty"`
 	EnabledForTemplateDeployment *string                             `json:"enabledForTemplateDeployment,omitempty"`
+	EnableSoftDelete             *string                             `json:"enableSoftDelete,omitempty"`
 	HardwareProfile              *compute.HardwareProfile            `json:"hardwareProfile,omitempty"`
 	IPConfigurations             *[]network.IPConfiguration          `json:"ipConfigurations,omitempty"`
 	NetworkProfile               *compute.NetworkProfile             `json:"networkProfile,omitempty"`
@@ -70,10 +93,18 @@ type Properties struct {
 	PublicIPAllocatedMethod      *network.IPAllocationMethod         `json:"publicIPAllocationMethod,omitempty"`
 	Sku                          *Sku                                `json:"sku,omitempty"`
 	//StorageProfile3              *compute.StorageProfile             `json:"storageProfile,omitempty"`
-	StorageProfile *StorageProfileUnion `json:"storageProfile,omitempty"`
-	Subnets        *[]network.Subnet    `json:"subnets,omitempty"`
-	TenantId       *string              `json:"tenantId,omitempty"`
-	Value          *string              `json:"value,omitempty"`
+	StorageProfile *StorageProfileUnion    `json:"storageProfile,omitempty"`
+	Subnets        *[]network.Subnet       `json:"subnets,omitempty"`
+	SecurityRules  *[]network.SecurityRule `json:"securityRules,omitempty"`
+	TenantId       *string                 `json:"tenantId,omitempty"`
+	Value          *string                 `json:"value,omitempty"`
+}
+
+// Template > Resource > Identity
+// The map values are simplified to struct{} since they are read-only and cannot be set
+type Identity struct {
+	Type                   *string             `json:"type,omitempty"`
+	UserAssignedIdentities map[string]struct{} `json:"userAssignedIdentities,omitempty"`
 }
 
 type AccessPolicies struct {

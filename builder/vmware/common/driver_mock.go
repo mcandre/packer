@@ -4,7 +4,7 @@ import (
 	"net"
 	"sync"
 
-	"github.com/hashicorp/packer/helper/multistep"
+	"github.com/hashicorp/packer-plugin-sdk/multistep"
 )
 
 type DriverMock struct {
@@ -13,6 +13,7 @@ type DriverMock struct {
 	CloneCalled bool
 	CloneDst    string
 	CloneSrc    string
+	Linked      bool
 	CloneErr    error
 
 	CompactDiskCalled bool
@@ -25,6 +26,9 @@ type DriverMock struct {
 	CreateDiskAdapterType string
 	CreateDiskTypeId      string
 	CreateDiskErr         error
+
+	ExportCalled bool
+	ExportArgs   []string
 
 	IsRunningCalled bool
 	IsRunningPath   string
@@ -51,10 +55,10 @@ type DriverMock struct {
 	GuestAddressResult string
 	GuestAddressErr    error
 
-	GuestIPCalled bool
-	GuestIPState  multistep.StateBag
-	GuestIPResult string
-	GuestIPErr    error
+	PotentialGuestIPCalled bool
+	PotentialGuestIPState  multistep.StateBag
+	PotentialGuestIPResult []string
+	PotentialGuestIPErr    error
 
 	StartCalled   bool
 	StartPath     string
@@ -91,6 +95,8 @@ type DriverMock struct {
 
 	VerifyCalled bool
 	VerifyErr    error
+
+	VerifyOvftoolCalled bool
 }
 
 type NetworkMapperMock struct {
@@ -98,19 +104,20 @@ type NetworkMapperMock struct {
 	DeviceIntoNameCalled int
 }
 
-func (m NetworkMapperMock) NameIntoDevice(name string) (string, error) {
+func (m NetworkMapperMock) NameIntoDevices(name string) ([]string, error) {
 	m.NameIntoDeviceCalled += 1
-	return "", nil
+	return make([]string, 0), nil
 }
 func (m NetworkMapperMock) DeviceIntoName(device string) (string, error) {
 	m.DeviceIntoNameCalled += 1
 	return "", nil
 }
 
-func (d *DriverMock) Clone(dst string, src string) error {
+func (d *DriverMock) Clone(dst string, src string, linked bool) error {
 	d.CloneCalled = true
 	d.CloneDst = dst
 	d.CloneSrc = src
+	d.Linked = linked
 	return d.CloneErr
 }
 
@@ -190,10 +197,10 @@ func (d *DriverMock) GuestAddress(state multistep.StateBag) (string, error) {
 	return d.GuestAddressResult, d.GuestAddressErr
 }
 
-func (d *DriverMock) GuestIP(state multistep.StateBag) (string, error) {
-	d.GuestIPCalled = true
-	d.GuestIPState = state
-	return d.GuestIPResult, d.GuestIPErr
+func (d *DriverMock) PotentialGuestIP(state multistep.StateBag) ([]string, error) {
+	d.PotentialGuestIPCalled = true
+	d.PotentialGuestIPState = state
+	return d.PotentialGuestIPResult, d.PotentialGuestIPErr
 }
 
 func (d *DriverMock) Start(path string, headless bool) error {
@@ -252,6 +259,12 @@ func (d *DriverMock) Verify() error {
 	return d.VerifyErr
 }
 
+func (d *DriverMock) Export(args []string) error {
+	d.ExportCalled = true
+	d.ExportArgs = args
+	return nil
+}
+
 func (d *DriverMock) GetVmwareDriver() VmwareDriver {
 	var state VmwareDriver
 	state.DhcpLeasesPath = func(string) string {
@@ -267,4 +280,8 @@ func (d *DriverMock) GetVmwareDriver() VmwareDriver {
 		return NetworkMapperMock{}, nil
 	}
 	return state
+}
+
+func (d *DriverMock) VerifyOvfTool(_ bool, _ bool) error {
+	return nil
 }

@@ -5,19 +5,19 @@ import (
 	"fmt"
 
 	"github.com/hashicorp/go-oracle-terraform/compute"
-	"github.com/hashicorp/packer/helper/multistep"
-	"github.com/hashicorp/packer/packer"
+	"github.com/hashicorp/packer-plugin-sdk/multistep"
+	packersdk "github.com/hashicorp/packer-plugin-sdk/packer"
 )
 
 type stepCreateInstance struct{}
 
-func (s *stepCreateInstance) Run(_ context.Context, state multistep.StateBag) multistep.StepAction {
+func (s *stepCreateInstance) Run(ctx context.Context, state multistep.StateBag) multistep.StepAction {
 	// get variables from state
-	ui := state.Get("ui").(packer.Ui)
+	ui := state.Get("ui").(packersdk.Ui)
 	ui.Say("Creating Instance...")
 
 	config := state.Get("config").(*Config)
-	client := state.Get("client").(*compute.ComputeClient)
+	client := state.Get("client").(*compute.Client)
 	ipAddName := state.Get("ipres_name").(string)
 	secListName := state.Get("security_list").(string)
 
@@ -34,12 +34,12 @@ func (s *stepCreateInstance) Run(_ context.Context, state multistep.StateBag) mu
 		Name:       config.ImageName,
 		Shape:      config.Shape,
 		ImageList:  config.SourceImageList,
+		Entry:      config.SourceImageListEntry,
 		Networking: map[string]compute.NetworkingInfo{"eth0": netInfo},
 		Attributes: config.attribs,
 	}
 	if config.Comm.Type == "ssh" {
-		keyName := state.Get("key_name").(string)
-		input.SSHKeys = []string{keyName}
+		input.SSHKeys = []string{config.Comm.SSHKeyPairName}
 	}
 
 	instanceInfo, err := instanceClient.CreateInstance(input)
@@ -57,18 +57,22 @@ func (s *stepCreateInstance) Run(_ context.Context, state multistep.StateBag) mu
 }
 
 func (s *stepCreateInstance) Cleanup(state multistep.StateBag) {
+	instanceID, ok := state.GetOk("instance_id")
+	if !ok {
+		return
+	}
+
 	// terminate instance
-	ui := state.Get("ui").(packer.Ui)
-	client := state.Get("client").(*compute.ComputeClient)
+	ui := state.Get("ui").(packersdk.Ui)
+	client := state.Get("client").(*compute.Client)
 	config := state.Get("config").(*Config)
-	imID := state.Get("instance_id").(string)
 
 	ui.Say("Terminating source instance...")
 
 	instanceClient := client.Instances()
 	input := &compute.DeleteInstanceInput{
 		Name: config.ImageName,
-		ID:   imID,
+		ID:   instanceID.(string),
 	}
 
 	err := instanceClient.DeleteInstance(input)
@@ -78,6 +82,5 @@ func (s *stepCreateInstance) Cleanup(state multistep.StateBag) {
 		state.Put("error", err)
 		return
 	}
-	// TODO wait for instance state to change to deleted?
 	ui.Say("Terminated instance.")
 }

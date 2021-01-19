@@ -3,37 +3,31 @@ package common
 import (
 	"context"
 	"fmt"
+	"time"
 
 	"github.com/aws/aws-sdk-go/aws"
-	"github.com/aws/aws-sdk-go/aws/awserr"
 	"github.com/aws/aws-sdk-go/aws/session"
 	"github.com/aws/aws-sdk-go/service/ec2"
-	retry "github.com/hashicorp/packer/common"
-	"github.com/hashicorp/packer/helper/multistep"
-	"github.com/hashicorp/packer/packer"
-	"github.com/hashicorp/packer/template/interpolate"
+	"github.com/hashicorp/packer-plugin-sdk/multistep"
+	packersdk "github.com/hashicorp/packer-plugin-sdk/packer"
+	"github.com/hashicorp/packer-plugin-sdk/retry"
+	"github.com/hashicorp/packer-plugin-sdk/template/interpolate"
+	"github.com/hashicorp/packer/builder/amazon/common/awserrors"
 )
 
 type StepCreateTags struct {
-	Tags         TagMap
-	SnapshotTags TagMap
+	Tags         map[string]string
+	SnapshotTags map[string]string
 	Ctx          interpolate.Context
 }
 
-func (s *StepCreateTags) Run(_ context.Context, state multistep.StateBag) multistep.StepAction {
+func (s *StepCreateTags) Run(ctx context.Context, state multistep.StateBag) multistep.StepAction {
 	ec2conn := state.Get("ec2").(*ec2.EC2)
 	session := state.Get("awsSession").(*session.Session)
-	ui := state.Get("ui").(packer.Ui)
+	ui := state.Get("ui").(packersdk.Ui)
 	amis := state.Get("amis").(map[string]string)
 
-	var sourceAMI string
-	if rawSourceAMI, hasSourceAMI := state.GetOk("source_image"); hasSourceAMI {
-		sourceAMI = *rawSourceAMI.(*ec2.Image).ImageId
-	} else {
-		sourceAMI = ""
-	}
-
-	if !s.Tags.IsSet() && !s.SnapshotTags.IsSet() {
+	if len(s.Tags) == 0 && len(s.SnapshotTags) == 0 {
 		return multistep.ActionContinue
 	}
 
@@ -79,7 +73,7 @@ func (s *StepCreateTags) Run(_ context.Context, state multistep.StateBag) multis
 
 		// Convert tags to ec2.Tag format
 		ui.Say("Creating AMI tags")
-		amiTags, err := s.Tags.EC2Tags(s.Ctx, *ec2conn.Config.Region, sourceAMI)
+		amiTags, err := TagMap(s.Tags).EC2Tags(s.Ctx, *ec2conn.Config.Region, state)
 		if err != nil {
 			state.Put("error", err)
 			ui.Error(err.Error())
@@ -88,7 +82,7 @@ func (s *StepCreateTags) Run(_ context.Context, state multistep.StateBag) multis
 		amiTags.Report(ui)
 
 		ui.Say("Creating snapshot tags")
-		snapshotTags, err := s.SnapshotTags.EC2Tags(s.Ctx, *ec2conn.Config.Region, sourceAMI)
+		snapshotTags, err := TagMap(s.SnapshotTags).EC2Tags(s.Ctx, *ec2conn.Config.Region, state)
 		if err != nil {
 			state.Put("error", err)
 			ui.Error(err.Error())
@@ -97,16 +91,24 @@ func (s *StepCreateTags) Run(_ context.Context, state multistep.StateBag) multis
 		snapshotTags.Report(ui)
 
 		// Retry creating tags for about 2.5 minutes
-		err = retry.Retry(0.2, 30, 11, func(_ uint) (bool, error) {
+		err = retry.Config{Tries: 11, ShouldRetry: func(error) bool {
+			if awserrors.Matches(err, "InvalidAMIID.NotFound", "") || awserrors.Matches(err, "InvalidSnapshot.NotFound", "") {
+				return true
+			}
+			return false
+		},
+			RetryDelay: (&retry.Backoff{InitialBackoff: 200 * time.Millisecond, MaxBackoff: 30 * time.Second, Multiplier: 2}).Linear,
+		}.Run(ctx, func(ctx context.Context) error {
 			// Tag images and snapshots
-			_, err := regionConn.CreateTags(&ec2.CreateTagsInput{
-				Resources: resourceIds,
-				Tags:      amiTags,
-			})
-			if awsErr, ok := err.(awserr.Error); ok {
-				if awsErr.Code() == "InvalidAMIID.NotFound" ||
-					awsErr.Code() == "InvalidSnapshot.NotFound" {
-					return false, nil
+
+			var err error
+			if len(amiTags) > 0 {
+				_, err = regionConn.CreateTags(&ec2.CreateTagsInput{
+					Resources: resourceIds,
+					Tags:      amiTags,
+				})
+				if err != nil {
+					return err
 				}
 			}
 
@@ -117,15 +119,7 @@ func (s *StepCreateTags) Run(_ context.Context, state multistep.StateBag) multis
 					Tags:      snapshotTags,
 				})
 			}
-			if err == nil {
-				return true, nil
-			}
-			if awsErr, ok := err.(awserr.Error); ok {
-				if awsErr.Code() == "InvalidSnapshot.NotFound" {
-					return false, nil
-				}
-			}
-			return true, err
+			return err
 		})
 
 		if err != nil {

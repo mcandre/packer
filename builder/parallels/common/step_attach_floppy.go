@@ -5,15 +5,15 @@ import (
 	"fmt"
 	"log"
 
-	"github.com/hashicorp/packer/helper/multistep"
-	"github.com/hashicorp/packer/packer"
+	"github.com/hashicorp/packer-plugin-sdk/multistep"
+	packersdk "github.com/hashicorp/packer-plugin-sdk/packer"
 )
 
 // StepAttachFloppy is a step that attaches a floppy to the virtual machine.
 //
 // Uses:
 //   driver Driver
-//   ui packer.Ui
+//   ui packersdk.Ui
 //   vmName string
 //
 // Produces:
@@ -23,7 +23,7 @@ type StepAttachFloppy struct {
 
 // Run adds a virtual FDD device to the VM and attaches the image.
 // If the image is not specified, then this step will be skipped.
-func (s *StepAttachFloppy) Run(_ context.Context, state multistep.StateBag) multistep.StepAction {
+func (s *StepAttachFloppy) Run(ctx context.Context, state multistep.StateBag) multistep.StepAction {
 	// Determine if we even have a floppy disk to attach
 	var floppyPath string
 	if floppyPathRaw, ok := state.GetOk("floppy_path"); ok {
@@ -34,7 +34,7 @@ func (s *StepAttachFloppy) Run(_ context.Context, state multistep.StateBag) mult
 	}
 
 	driver := state.Get("driver").(Driver)
-	ui := state.Get("ui").(packer.Ui)
+	ui := state.Get("ui").(packersdk.Ui)
 	vmName := state.Get("vmName").(string)
 
 	ui.Say("Deleting any current floppy disk...")

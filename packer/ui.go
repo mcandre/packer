@@ -1,21 +1,23 @@
 package packer
 
 import (
-	"bufio"
 	"bytes"
 	"errors"
 	"fmt"
 	"io"
 	"log"
 	"os"
-	"os/signal"
 	"runtime"
 	"strings"
-	"sync"
 	"syscall"
 	"time"
 	"unicode"
+
+	getter "github.com/hashicorp/go-getter/v2"
+	packersdk "github.com/hashicorp/packer-plugin-sdk/packer"
 )
+
+var ErrInterrupted = errors.New("interrupted")
 
 type UiColor uint
 
@@ -28,51 +30,15 @@ const (
 	UiColorCyan            = 36
 )
 
-// The Ui interface handles all communication for Packer with the outside
-// world. This sort of control allows us to strictly control how output
-// is formatted and various levels of output.
-type Ui interface {
-	Ask(string) (string, error)
-	Say(string)
-	Message(string)
-	Error(string)
-	Machine(string, ...string)
-}
-
 // ColoredUi is a UI that is colored using terminal colors.
 type ColoredUi struct {
 	Color      UiColor
 	ErrorColor UiColor
-	Ui         Ui
+	Ui         packersdk.Ui
+	PB         getter.ProgressTracker
 }
 
-// TargetedUI is a UI that wraps another UI implementation and modifies
-// the output to indicate a specific target. Specifically, all Say output
-// is prefixed with the target name. Message output is not prefixed but
-// is offset by the length of the target so that output is lined up properly
-// with Say output. Machine-readable output has the proper target set.
-type TargetedUI struct {
-	Target string
-	Ui     Ui
-}
-
-// The BasicUI is a UI that reads and writes from a standard Go reader
-// and writer. It is safe to be called from multiple goroutines. Machine
-// readable output is simply logged for this UI.
-type BasicUi struct {
-	Reader      io.Reader
-	Writer      io.Writer
-	ErrorWriter io.Writer
-	l           sync.Mutex
-	interrupted bool
-	scanner     *bufio.Scanner
-}
-
-// MachineReadableUi is a UI that only outputs machine-readable output
-// to the given Writer.
-type MachineReadableUi struct {
-	Writer io.Writer
-}
+var _ packersdk.Ui = new(ColoredUi)
 
 func (u *ColoredUi) Ask(query string) (string, error) {
 	return u.Ui.Ask(u.colorize(query, u.Color, true))
@@ -98,6 +64,10 @@ func (u *ColoredUi) Error(message string) {
 func (u *ColoredUi) Machine(t string, args ...string) {
 	// Don't colorize machine-readable output
 	u.Ui.Machine(t, args...)
+}
+
+func (u *ColoredUi) TrackProgress(src string, currentSize, totalSize int64, stream io.ReadCloser) io.ReadCloser {
+	return u.Ui.TrackProgress(u.colorize(src, u.Color, false), currentSize, totalSize, stream)
 }
 
 func (u *ColoredUi) colorize(message string, color UiColor, bold bool) string {
@@ -131,6 +101,18 @@ func (u *ColoredUi) supportsColors() bool {
 
 	return cygwin
 }
+
+// TargetedUI is a UI that wraps another UI implementation and modifies
+// the output to indicate a specific target. Specifically, all Say output
+// is prefixed with the target name. Message output is not prefixed but
+// is offset by the length of the target so that output is lined up properly
+// with Say output. Machine-readable output has the proper target set.
+type TargetedUI struct {
+	Target string
+	Ui     packersdk.Ui
+}
+
+var _ packersdk.Ui = new(TargetedUI)
 
 func (u *TargetedUI) Ask(query string) (string, error) {
 	return u.Ui.Ask(u.prefixLines(true, query))
@@ -168,97 +150,18 @@ func (u *TargetedUI) prefixLines(arrow bool, message string) string {
 	return strings.TrimRightFunc(result.String(), unicode.IsSpace)
 }
 
-func (rw *BasicUi) Ask(query string) (string, error) {
-	rw.l.Lock()
-	defer rw.l.Unlock()
-
-	if rw.interrupted {
-		return "", errors.New("interrupted")
-	}
-
-	if rw.scanner == nil {
-		rw.scanner = bufio.NewScanner(rw.Reader)
-	}
-	sigCh := make(chan os.Signal, 1)
-	signal.Notify(sigCh, os.Interrupt, syscall.SIGTERM)
-	defer signal.Stop(sigCh)
-
-	log.Printf("ui: ask: %s", query)
-	if query != "" {
-		if _, err := fmt.Fprint(rw.Writer, query+" "); err != nil {
-			return "", err
-		}
-	}
-
-	result := make(chan string, 1)
-	go func() {
-		var line string
-		if rw.scanner.Scan() {
-			line = rw.scanner.Text()
-		}
-		if err := rw.scanner.Err(); err != nil {
-			log.Printf("ui: scan err: %s", err)
-			return
-		}
-		result <- line
-	}()
-
-	select {
-	case line := <-result:
-		return line, nil
-	case <-sigCh:
-		// Print a newline so that any further output starts properly
-		// on a new line.
-		fmt.Fprintln(rw.Writer)
-
-		// Mark that we were interrupted so future Ask calls fail.
-		rw.interrupted = true
-
-		return "", errors.New("interrupted")
-	}
+func (u *TargetedUI) TrackProgress(src string, currentSize, totalSize int64, stream io.ReadCloser) io.ReadCloser {
+	return u.Ui.TrackProgress(u.prefixLines(false, src), currentSize, totalSize, stream)
 }
 
-func (rw *BasicUi) Say(message string) {
-	rw.l.Lock()
-	defer rw.l.Unlock()
-
-	log.Printf("ui: %s", message)
-	_, err := fmt.Fprint(rw.Writer, message+"\n")
-	if err != nil {
-		log.Printf("[ERR] Failed to write to UI: %s", err)
-	}
+// MachineReadableUi is a UI that only outputs machine-readable output
+// to the given Writer.
+type MachineReadableUi struct {
+	Writer io.Writer
+	PB     packersdk.NoopProgressTracker
 }
 
-func (rw *BasicUi) Message(message string) {
-	rw.l.Lock()
-	defer rw.l.Unlock()
-
-	log.Printf("ui: %s", message)
-	_, err := fmt.Fprint(rw.Writer, message+"\n")
-	if err != nil {
-		log.Printf("[ERR] Failed to write to UI: %s", err)
-	}
-}
-
-func (rw *BasicUi) Error(message string) {
-	rw.l.Lock()
-	defer rw.l.Unlock()
-
-	writer := rw.ErrorWriter
-	if writer == nil {
-		writer = rw.Writer
-	}
-
-	log.Printf("ui error: %s", message)
-	_, err := fmt.Fprint(writer, message+"\n")
-	if err != nil {
-		log.Printf("[ERR] Failed to write to UI: %s", err)
-	}
-}
-
-func (rw *BasicUi) Machine(t string, args ...string) {
-	log.Printf("machine readable: %s %#v", t, args)
-}
+var _ packersdk.Ui = new(MachineReadableUi)
 
 func (u *MachineReadableUi) Ask(query string) (string, error) {
 	return "", errors.New("machine-readable UI can't ask")
@@ -289,6 +192,8 @@ func (u *MachineReadableUi) Machine(category string, args ...string) {
 
 	// Prepare the args
 	for i, v := range args {
+		// Use packersdk.LogSecretFilter to scrub out sensitive variables
+		args[i] = packersdk.LogSecretFilter.FilterString(args[i])
 		args[i] = strings.Replace(v, ",", "%!(PACKER_COMMA)", -1)
 		args[i] = strings.Replace(args[i], "\r", "\\r", -1)
 		args[i] = strings.Replace(args[i], "\n", "\\n", -1)
@@ -304,4 +209,46 @@ func (u *MachineReadableUi) Machine(category string, args ...string) {
 			panic(err)
 		}
 	}
+	log.Printf("%d,%s,%s,%s\n", now.Unix(), target, category, argsString)
+}
+
+func (u *MachineReadableUi) TrackProgress(src string, currentSize, totalSize int64, stream io.ReadCloser) (body io.ReadCloser) {
+	return u.PB.TrackProgress(src, currentSize, totalSize, stream)
+}
+
+// TimestampedUi is a UI that wraps another UI implementation and
+// prefixes each message with an RFC3339 timestamp
+type TimestampedUi struct {
+	Ui packersdk.Ui
+	PB getter.ProgressTracker
+}
+
+var _ packersdk.Ui = new(TimestampedUi)
+
+func (u *TimestampedUi) Ask(query string) (string, error) {
+	return u.Ui.Ask(query)
+}
+
+func (u *TimestampedUi) Say(message string) {
+	u.Ui.Say(u.timestampLine(message))
+}
+
+func (u *TimestampedUi) Message(message string) {
+	u.Ui.Message(u.timestampLine(message))
+}
+
+func (u *TimestampedUi) Error(message string) {
+	u.Ui.Error(u.timestampLine(message))
+}
+
+func (u *TimestampedUi) Machine(message string, args ...string) {
+	u.Ui.Machine(message, args...)
+}
+
+func (u *TimestampedUi) TrackProgress(src string, currentSize, totalSize int64, stream io.ReadCloser) (body io.ReadCloser) {
+	return u.Ui.TrackProgress(src, currentSize, totalSize, stream)
+}
+
+func (u *TimestampedUi) timestampLine(string string) string {
+	return fmt.Sprintf("%v: %v", time.Now().Format(time.RFC3339), string)
 }

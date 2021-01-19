@@ -16,8 +16,9 @@ import (
 	"time"
 	"unicode"
 
-	"github.com/hashicorp/packer/packer"
-	packrpc "github.com/hashicorp/packer/packer/rpc"
+	packersdk "github.com/hashicorp/packer-plugin-sdk/packer"
+	pluginsdk "github.com/hashicorp/packer-plugin-sdk/plugin"
+	packerrpc "github.com/hashicorp/packer-plugin-sdk/rpc"
 )
 
 // If this is true, then the "unexpected EOF" panic will not be
@@ -56,7 +57,7 @@ type ClientConfig struct {
 	// The minimum and maximum port to use for communicating with
 	// the subprocess. If not set, this defaults to 10,000 and 25,000
 	// respectively.
-	MinPort, MaxPort uint
+	MinPort, MaxPort int
 
 	// StartTimeout is the timeout to wait for the plugin to say it
 	// has started successfully.
@@ -130,8 +131,8 @@ func (c *Client) Exited() bool {
 
 // Returns a builder implementation that is communicating over this
 // client. If the client hasn't been started, this will start it.
-func (c *Client) Builder() (packer.Builder, error) {
-	client, err := c.packrpcClient()
+func (c *Client) Builder() (packersdk.Builder, error) {
+	client, err := c.Client()
 	if err != nil {
 		return nil, err
 	}
@@ -141,8 +142,8 @@ func (c *Client) Builder() (packer.Builder, error) {
 
 // Returns a hook implementation that is communicating over this
 // client. If the client hasn't been started, this will start it.
-func (c *Client) Hook() (packer.Hook, error) {
-	client, err := c.packrpcClient()
+func (c *Client) Hook() (packersdk.Hook, error) {
+	client, err := c.Client()
 	if err != nil {
 		return nil, err
 	}
@@ -152,8 +153,8 @@ func (c *Client) Hook() (packer.Hook, error) {
 
 // Returns a post-processor implementation that is communicating over
 // this client. If the client hasn't been started, this will start it.
-func (c *Client) PostProcessor() (packer.PostProcessor, error) {
-	client, err := c.packrpcClient()
+func (c *Client) PostProcessor() (packersdk.PostProcessor, error) {
+	client, err := c.Client()
 	if err != nil {
 		return nil, err
 	}
@@ -163,8 +164,8 @@ func (c *Client) PostProcessor() (packer.PostProcessor, error) {
 
 // Returns a provisioner implementation that is communicating over this
 // client. If the client hasn't been started, this will start it.
-func (c *Client) Provisioner() (packer.Provisioner, error) {
-	client, err := c.packrpcClient()
+func (c *Client) Provisioner() (packersdk.Provisioner, error) {
+	client, err := c.Client()
 	if err != nil {
 		return nil, err
 	}
@@ -208,7 +209,7 @@ func (c *Client) Start() (addr net.Addr, err error) {
 	c.doneLogging = make(chan struct{})
 
 	env := []string{
-		fmt.Sprintf("%s=%s", MagicCookieKey, MagicCookieValue),
+		fmt.Sprintf("%s=%s", pluginsdk.MagicCookieKey, pluginsdk.MagicCookieValue),
 		fmt.Sprintf("PACKER_PLUGIN_MIN_PORT=%d", c.config.MinPort),
 		fmt.Sprintf("PACKER_PLUGIN_MAX_PORT=%d", c.config.MaxPort),
 	}
@@ -318,17 +319,19 @@ func (c *Client) Start() (addr net.Addr, err error) {
 		}
 
 		// Test the API version
-		if parts[0] != APIVersion {
+		if parts[0] != pluginsdk.APIVersion {
 			err = fmt.Errorf("Incompatible API version with plugin. "+
-				"Plugin version: %s, Ours: %s", parts[0], APIVersion)
+				"Plugin version: %s, Ours: %s", parts[0], pluginsdk.APIVersion)
 			return
 		}
 
 		switch parts[1] {
 		case "tcp":
 			addr, err = net.ResolveTCPAddr("tcp", parts[2])
+			log.Printf("Received tcp RPC address for %s: addr is %s", cmd.Path, addr)
 		case "unix":
 			addr, err = net.ResolveUnixAddr("unix", parts[2])
+			log.Printf("Received unix RPC address for %s: addr is %s", cmd.Path, addr)
 		default:
 			err = fmt.Errorf("Unknown address type: %s", parts[1])
 		}
@@ -339,6 +342,13 @@ func (c *Client) Start() (addr net.Addr, err error) {
 }
 
 func (c *Client) logStderr(r io.Reader) {
+	logPrefix := filepath.Base(c.config.Cmd.Path)
+	if logPrefix == "packer" {
+		// we just called the normal packer binary with the plugin arg.
+		// grab the last arg from the list which will match the plugin name.
+		logPrefix = c.config.Cmd.Args[len(c.config.Cmd.Args)-1]
+	}
+
 	bufR := bufio.NewReader(r)
 	for {
 		line, err := bufR.ReadString('\n')
@@ -346,7 +356,8 @@ func (c *Client) logStderr(r io.Reader) {
 			c.config.Stderr.Write([]byte(line))
 
 			line = strings.TrimRightFunc(line, unicode.IsSpace)
-			log.Printf("%s: %s", filepath.Base(c.config.Cmd.Path), line)
+
+			log.Printf("%s plugin: %s", logPrefix, line)
 		}
 
 		if err == io.EOF {
@@ -358,7 +369,7 @@ func (c *Client) logStderr(r io.Reader) {
 	close(c.doneLogging)
 }
 
-func (c *Client) packrpcClient() (*packrpc.Client, error) {
+func (c *Client) Client() (*packerrpc.Client, error) {
 	addr, err := c.Start()
 	if err != nil {
 		return nil, err
@@ -374,7 +385,7 @@ func (c *Client) packrpcClient() (*packrpc.Client, error) {
 		tcpConn.SetKeepAlive(true)
 	}
 
-	client, err := packrpc.NewClient(conn)
+	client, err := packerrpc.NewClient(conn)
 	if err != nil {
 		conn.Close()
 		return nil, err

@@ -1,16 +1,20 @@
+//go:generate mapstructure-to-hcl2 -type Config
+
 package dockersave
 
 import (
+	"context"
 	"fmt"
 	"os"
 
+	"github.com/hashicorp/hcl/v2/hcldec"
+	"github.com/hashicorp/packer-plugin-sdk/common"
+	packersdk "github.com/hashicorp/packer-plugin-sdk/packer"
+	"github.com/hashicorp/packer-plugin-sdk/template/config"
+	"github.com/hashicorp/packer-plugin-sdk/template/interpolate"
 	"github.com/hashicorp/packer/builder/docker"
-	"github.com/hashicorp/packer/common"
-	"github.com/hashicorp/packer/helper/config"
-	"github.com/hashicorp/packer/packer"
-	"github.com/hashicorp/packer/post-processor/docker-import"
-	"github.com/hashicorp/packer/post-processor/docker-tag"
-	"github.com/hashicorp/packer/template/interpolate"
+	dockerimport "github.com/hashicorp/packer/post-processor/docker-import"
+	dockertag "github.com/hashicorp/packer/post-processor/docker-tag"
 )
 
 const BuilderId = "packer.post-processor.docker-save"
@@ -29,8 +33,11 @@ type PostProcessor struct {
 	config Config
 }
 
+func (p *PostProcessor) ConfigSpec() hcldec.ObjectSpec { return p.config.FlatMapstructure().HCL2Spec() }
+
 func (p *PostProcessor) Configure(raws ...interface{}) error {
 	err := config.Decode(&p.config, &config.DecodeOpts{
+		PluginType:         BuilderId,
 		Interpolate:        true,
 		InterpolateContext: &p.config.ctx,
 		InterpolateFilter: &interpolate.RenderFilter{
@@ -45,13 +52,13 @@ func (p *PostProcessor) Configure(raws ...interface{}) error {
 
 }
 
-func (p *PostProcessor) PostProcess(ui packer.Ui, artifact packer.Artifact) (packer.Artifact, bool, error) {
+func (p *PostProcessor) PostProcess(ctx context.Context, ui packersdk.Ui, artifact packersdk.Artifact) (packersdk.Artifact, bool, bool, error) {
 	if artifact.BuilderId() != dockerimport.BuilderId &&
 		artifact.BuilderId() != dockertag.BuilderId {
 		err := fmt.Errorf(
 			"Unknown artifact type: %s\nCan only save Docker builder artifacts.",
 			artifact.BuilderId())
-		return nil, false, err
+		return nil, false, false, err
 	}
 
 	path := p.config.Path
@@ -60,7 +67,7 @@ func (p *PostProcessor) PostProcess(ui packer.Ui, artifact packer.Artifact) (pac
 	f, err := os.Create(path)
 	if err != nil {
 		err := fmt.Errorf("Error creating output file: %s", err)
-		return nil, false, err
+		return nil, false, false, err
 	}
 
 	driver := p.Driver
@@ -75,11 +82,11 @@ func (p *PostProcessor) PostProcess(ui packer.Ui, artifact packer.Artifact) (pac
 		f.Close()
 		os.Remove(f.Name())
 
-		return nil, false, err
+		return nil, false, false, err
 	}
 
 	f.Close()
 	ui.Message("Saved to: " + path)
 
-	return artifact, true, nil
+	return artifact, true, false, nil
 }

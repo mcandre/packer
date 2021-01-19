@@ -3,22 +3,24 @@ package digitalocean
 import (
 	"context"
 	"fmt"
+	"log"
+	"strconv"
 
 	"io/ioutil"
 
 	"github.com/digitalocean/godo"
-	"github.com/hashicorp/packer/helper/multistep"
-	"github.com/hashicorp/packer/packer"
+	"github.com/hashicorp/packer-plugin-sdk/multistep"
+	packersdk "github.com/hashicorp/packer-plugin-sdk/packer"
 )
 
 type stepCreateDroplet struct {
 	dropletId int
 }
 
-func (s *stepCreateDroplet) Run(_ context.Context, state multistep.StateBag) multistep.StepAction {
+func (s *stepCreateDroplet) Run(ctx context.Context, state multistep.StateBag) multistep.StepAction {
 	client := state.Get("client").(*godo.Client)
-	ui := state.Get("ui").(packer.Ui)
-	c := state.Get("config").(Config)
+	ui := state.Get("ui").(packersdk.Ui)
+	c := state.Get("config").(*Config)
 	sshKeyId := state.Get("ssh_key_id").(int)
 
 	// Create the droplet based on configuration
@@ -35,13 +37,13 @@ func (s *stepCreateDroplet) Run(_ context.Context, state multistep.StateBag) mul
 		userData = string(contents)
 	}
 
-	droplet, _, err := client.Droplets.Create(context.TODO(), &godo.DropletCreateRequest{
+	createImage := getImageType(c.Image)
+
+	dropletCreateReq := &godo.DropletCreateRequest{
 		Name:   c.DropletName,
 		Region: c.Region,
 		Size:   c.Size,
-		Image: godo.DropletCreateImage{
-			Slug: c.Image,
-		},
+		Image:  createImage,
 		SSHKeys: []godo.DropletCreateSSHKey{
 			{ID: sshKeyId},
 		},
@@ -49,7 +51,13 @@ func (s *stepCreateDroplet) Run(_ context.Context, state multistep.StateBag) mul
 		Monitoring:        c.Monitoring,
 		IPv6:              c.IPv6,
 		UserData:          userData,
-	})
+		Tags:              c.Tags,
+		VPCUUID:           c.VPCUUID,
+	}
+
+	log.Printf("[DEBUG] Droplet create paramaters: %s", godo.Stringify(dropletCreateReq))
+
+	droplet, _, err := client.Droplets.Create(context.TODO(), dropletCreateReq)
 	if err != nil {
 		err := fmt.Errorf("Error creating droplet: %s", err)
 		state.Put("error", err)
@@ -62,6 +70,9 @@ func (s *stepCreateDroplet) Run(_ context.Context, state multistep.StateBag) mul
 
 	// Store the droplet id for later
 	state.Put("droplet_id", droplet.ID)
+	// instance_id is the generic term used so that users can have access to the
+	// instance id inside of the provisioners, used in step_provision.
+	state.Put("instance_id", droplet.ID)
 
 	return multistep.ActionContinue
 }
@@ -73,7 +84,7 @@ func (s *stepCreateDroplet) Cleanup(state multistep.StateBag) {
 	}
 
 	client := state.Get("client").(*godo.Client)
-	ui := state.Get("ui").(packer.Ui)
+	ui := state.Get("ui").(packersdk.Ui)
 
 	// Destroy the droplet we just created
 	ui.Say("Destroying droplet...")
@@ -82,4 +93,15 @@ func (s *stepCreateDroplet) Cleanup(state multistep.StateBag) {
 		ui.Error(fmt.Sprintf(
 			"Error destroying droplet. Please destroy it manually: %s", err))
 	}
+}
+
+func getImageType(image string) godo.DropletCreateImage {
+	createImage := godo.DropletCreateImage{Slug: image}
+
+	imageId, err := strconv.Atoi(image)
+	if err == nil {
+		createImage = godo.DropletCreateImage{ID: imageId}
+	}
+
+	return createImage
 }

@@ -1,3 +1,5 @@
+//go:generate mapstructure-to-hcl2 -type Config
+
 package oneandone
 
 import (
@@ -6,11 +8,11 @@ import (
 	"strings"
 
 	"github.com/1and1/oneandone-cloudserver-sdk-go"
-	"github.com/hashicorp/packer/common"
-	"github.com/hashicorp/packer/helper/communicator"
-	"github.com/hashicorp/packer/helper/config"
-	"github.com/hashicorp/packer/packer"
-	"github.com/hashicorp/packer/template/interpolate"
+	"github.com/hashicorp/packer-plugin-sdk/common"
+	"github.com/hashicorp/packer-plugin-sdk/communicator"
+	packersdk "github.com/hashicorp/packer-plugin-sdk/packer"
+	"github.com/hashicorp/packer-plugin-sdk/template/config"
+	"github.com/hashicorp/packer-plugin-sdk/template/interpolate"
 	"github.com/mitchellh/mapstructure"
 )
 
@@ -20,22 +22,19 @@ type Config struct {
 
 	Token          string `mapstructure:"token"`
 	Url            string `mapstructure:"url"`
-	SSHKey         string
 	SnapshotName   string `mapstructure:"image_name"`
 	DataCenterName string `mapstructure:"data_center_name"`
 	DataCenterId   string
-	Image          string              `mapstructure:"source_image_name"`
-	DiskSize       int                 `mapstructure:"disk_size"`
-	Retries        int                 `mapstructure:"retries"`
-	CommConfig     communicator.Config `mapstructure:",squash"`
+	Image          string `mapstructure:"source_image_name"`
+	DiskSize       int    `mapstructure:"disk_size"`
+	Retries        int    `mapstructure:"retries"`
 	ctx            interpolate.Context
 }
 
-func NewConfig(raws ...interface{}) (*Config, []string, error) {
-	var c Config
+func (c *Config) Prepare(raws ...interface{}) ([]string, error) {
 
 	var md mapstructure.Metadata
-	err := config.Decode(&c, &config.DecodeOpts{
+	err := config.Decode(c, &config.DecodeOpts{
 		Metadata:           &md,
 		Interpolate:        true,
 		InterpolateContext: &c.ctx,
@@ -46,10 +45,10 @@ func NewConfig(raws ...interface{}) (*Config, []string, error) {
 		},
 	}, raws...)
 	if err != nil {
-		return nil, nil, err
+		return nil, err
 	}
 
-	var errs *packer.MultiError
+	var errs *packersdk.MultiError
 
 	if c.SnapshotName == "" {
 		def, err := interpolate.Render("packer-{{timestamp}}", nil)
@@ -62,7 +61,7 @@ func NewConfig(raws ...interface{}) (*Config, []string, error) {
 	}
 
 	if c.Image == "" {
-		errs = packer.MultiErrorAppend(
+		errs = packersdk.MultiErrorAppend(
 			errs, errors.New("1&1 'image' is required"))
 	}
 
@@ -91,11 +90,11 @@ func NewConfig(raws ...interface{}) (*Config, []string, error) {
 		dcs, err := api.ListDatacenters()
 
 		if err != nil {
-			errs = packer.MultiErrorAppend(
+			errs = packersdk.MultiErrorAppend(
 				errs, err)
 		}
 		for _, dc := range dcs {
-			if strings.ToLower(dc.CountryCode) == strings.ToLower(c.DataCenterName) {
+			if strings.EqualFold(dc.CountryCode, c.DataCenterName) {
 				c.DataCenterId = dc.Id
 				break
 			}
@@ -103,13 +102,12 @@ func NewConfig(raws ...interface{}) (*Config, []string, error) {
 	}
 
 	if es := c.Comm.Prepare(&c.ctx); len(es) > 0 {
-		errs = packer.MultiErrorAppend(errs, es...)
+		errs = packersdk.MultiErrorAppend(errs, es...)
 	}
 
 	if errs != nil && len(errs.Errors) > 0 {
-		return nil, nil, errs
+		return nil, errs
 	}
-	common.ScrubConfig(c, c.Token)
-
-	return &c, nil, nil
+	packersdk.LogSecretFilter.Set(c.Token)
+	return nil, nil
 }

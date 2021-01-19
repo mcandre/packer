@@ -6,7 +6,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/hashicorp/packer/helper/multistep"
+	"github.com/hashicorp/packer-plugin-sdk/multistep"
 )
 
 func TestStepInstanceInfo_impl(t *testing.T) {
@@ -149,14 +149,14 @@ func TestStepInstanceInfo_errorTimeout(t *testing.T) {
 
 	errCh := make(chan error, 1)
 	go func() {
-		<-time.After(10 * time.Millisecond)
+		<-time.After(50 * time.Millisecond)
 		errCh <- nil
 	}()
 
 	state.Put("instance_name", "foo")
 
 	config := state.Get("config").(*Config)
-	config.stateTimeout = 1 * time.Microsecond
+	config.StateTimeout = 1 * time.Millisecond
 
 	driver := state.Get("driver").(*DriverMock)
 	driver.WaitForInstanceErrCh = errCh

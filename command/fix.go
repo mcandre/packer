@@ -2,14 +2,17 @@ package command
 
 import (
 	"bytes"
+	"context"
 	"encoding/json"
 	"fmt"
 	"log"
 	"os"
 	"strings"
 
+	"github.com/hashicorp/packer-plugin-sdk/template"
 	"github.com/hashicorp/packer/fix"
-	"github.com/hashicorp/packer/template"
+
+	"github.com/posener/complete"
 )
 
 type FixCommand struct {
@@ -17,22 +20,38 @@ type FixCommand struct {
 }
 
 func (c *FixCommand) Run(args []string) int {
-	var flagValidate bool
+	ctx, cleanup := handleTermInterrupt(c.Ui)
+	defer cleanup()
+
+	cfg, ret := c.ParseArgs(args)
+	if ret != 0 {
+		return ret
+	}
+
+	return c.RunContext(ctx, cfg)
+}
+
+func (c *FixCommand) ParseArgs(args []string) (*FixArgs, int) {
+	var cfg FixArgs
 	flags := c.Meta.FlagSet("fix", FlagSetNone)
-	flags.BoolVar(&flagValidate, "validate", true, "")
 	flags.Usage = func() { c.Ui.Say(c.Help()) }
+	cfg.AddFlagSets(flags)
 	if err := flags.Parse(args); err != nil {
-		return 1
+		return &cfg, 1
 	}
 
 	args = flags.Args()
 	if len(args) != 1 {
 		flags.Usage()
-		return 1
+		return &cfg, 1
 	}
+	cfg.Path = args[0]
+	return &cfg, 0
+}
 
+func (c *FixCommand) RunContext(ctx context.Context, cla *FixArgs) int {
 	// Read the file for decoding
-	tplF, err := os.Open(args[0])
+	tplF, err := os.Open(cla.Path)
 	if err != nil {
 		c.Ui.Error(fmt.Sprintf("Error opening template: %s", err))
 		return 1
@@ -84,25 +103,27 @@ func (c *FixCommand) Run(args []string) int {
 	result = strings.Replace(result, `\u003e`, ">", -1)
 	c.Ui.Say(result)
 
-	if flagValidate {
-		// Attemot to parse and validate the template
-		tpl, err := template.Parse(strings.NewReader(result))
-		if err != nil {
-			c.Ui.Error(fmt.Sprintf(
-				"Error! Fixed template fails to parse: %s\n\n"+
-					"This is usually caused by an error in the input template.\n"+
-					"Please fix the error and try again.",
-				err))
-			return 1
-		}
-		if err := tpl.Validate(); err != nil {
-			c.Ui.Error(fmt.Sprintf(
-				"Error! Fixed template failed to validate: %s\n\n"+
-					"This is usually caused by an error in the input template.\n"+
-					"Please fix the error and try again.",
-				err))
-			return 1
-		}
+	if cla.Validate == false {
+		return 0
+	}
+
+	// Attempt to parse and validate the template
+	tpl, err := template.Parse(strings.NewReader(result))
+	if err != nil {
+		c.Ui.Error(fmt.Sprintf(
+			"Error! Fixed template fails to parse: %s\n\n"+
+				"This is usually caused by an error in the input template.\n"+
+				"Please fix the error and try again.",
+			err))
+		return 1
+	}
+	if err := tpl.Validate(); err != nil {
+		c.Ui.Error(fmt.Sprintf(
+			"Error! Fixed template failed to validate: %s\n\n"+
+				"This is usually caused by an error in the input template.\n"+
+				"Please fix the error and try again.",
+			err))
+		return 1
 	}
 
 	return 0
@@ -118,17 +139,16 @@ Usage: packer fix [options] TEMPLATE
   If the template cannot be fixed due to an error, the command will exit
   with a non-zero exit status. Error messages will appear on standard error.
 
-Fixes that are run:
+Fixes that are run (in order):
 
-  iso-md5             Replaces "iso_md5" in builders with newer "iso_checksum"
-  createtime          Replaces ".CreateTime" in builder configs with "{{timestamp}}"
-  virtualbox-gaattach Updates VirtualBox builders using "guest_additions_attach"
-                      to use "guest_additions_mode"
-  pp-vagrant-override Replaces old-style provider overrides for the Vagrant
-                      post-processor to new-style as of Packer 0.5.0.
-  virtualbox-rename   Updates "virtualbox" builders to "virtualbox-iso"
-  vmware-rename       Updates "vmware" builders to "vmware-iso"
+`
 
+	for _, name := range fix.FixerOrder {
+		helpText += fmt.Sprintf(
+			"  %-27s%s\n", name, fix.Fixers[name].Synopsis())
+	}
+
+	helpText += `
 Options:
 
   -validate=true      If true (default), validates the fixed template.
@@ -139,4 +159,14 @@ Options:
 
 func (c *FixCommand) Synopsis() string {
 	return "fixes templates from old versions of packer"
+}
+
+func (c *FixCommand) AutocompleteArgs() complete.Predictor {
+	return complete.PredictNothing
+}
+
+func (c *FixCommand) AutocompleteFlags() complete.Flags {
+	return complete.Flags{
+		"-validate": complete.PredictNothing,
+	}
 }

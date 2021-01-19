@@ -6,8 +6,8 @@ import (
 	"fmt"
 	"time"
 
-	"github.com/hashicorp/packer/helper/multistep"
-	"github.com/hashicorp/packer/packer"
+	"github.com/hashicorp/packer-plugin-sdk/multistep"
+	packersdk "github.com/hashicorp/packer-plugin-sdk/packer"
 )
 
 // stepInstanceInfo represents a Packer build step that gathers GCE instance info.
@@ -17,10 +17,10 @@ type StepInstanceInfo struct {
 
 // Run executes the Packer build step that gathers GCE instance info.
 // This adds "instance_ip" to the multistep state.
-func (s *StepInstanceInfo) Run(_ context.Context, state multistep.StateBag) multistep.StepAction {
+func (s *StepInstanceInfo) Run(ctx context.Context, state multistep.StateBag) multistep.StepAction {
 	config := state.Get("config").(*Config)
 	driver := state.Get("driver").(Driver)
-	ui := state.Get("ui").(packer.Ui)
+	ui := state.Get("ui").(packersdk.Ui)
 
 	instanceName := state.Get("instance_name").(string)
 
@@ -29,7 +29,7 @@ func (s *StepInstanceInfo) Run(_ context.Context, state multistep.StateBag) mult
 	var err error
 	select {
 	case err = <-errCh:
-	case <-time.After(config.stateTimeout):
+	case <-time.After(config.StateTimeout):
 		err = errors.New("time out while waiting for instance to become running")
 	}
 

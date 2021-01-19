@@ -7,25 +7,25 @@ import (
 	"reflect"
 	"testing"
 
-	"github.com/hashicorp/packer/packer"
+	"github.com/hashicorp/packer-plugin-sdk/common"
+	packersdk "github.com/hashicorp/packer-plugin-sdk/packer"
 )
 
 func testConfig() map[string]interface{} {
 	return map[string]interface{}{
-		"iso_checksum":      "foo",
-		"iso_checksum_type": "md5",
-		"iso_url":           "http://www.packer.io",
-		"shutdown_command":  "foo",
-		"ssh_username":      "foo",
+		"iso_checksum":     "md5:0B0F137F17AC10944716020B018F8126",
+		"iso_url":          "http://www.packer.io",
+		"shutdown_command": "foo",
+		"ssh_username":     "foo",
 
-		packer.BuildNameConfigKey: "foo",
+		common.BuildNameConfigKey: "foo",
 	}
 }
 
 func TestBuilder_ImplementsBuilder(t *testing.T) {
 	var raw interface{}
 	raw = &Builder{}
-	if _, ok := raw.(packer.Builder); !ok {
+	if _, ok := raw.(packersdk.Builder); !ok {
 		t.Error("Builder must implement builder.")
 	}
 }
@@ -33,7 +33,7 @@ func TestBuilder_ImplementsBuilder(t *testing.T) {
 func TestBuilderPrepare_Defaults(t *testing.T) {
 	var b Builder
 	config := testConfig()
-	warns, err := b.Prepare(config)
+	_, warns, err := b.Prepare(config)
 	if len(warns) > 0 {
 		t.Fatalf("bad: %#v", warns)
 	}
@@ -63,7 +63,7 @@ func TestBuilderPrepare_DiskSize(t *testing.T) {
 	config := testConfig()
 
 	delete(config, "disk_size")
-	warns, err := b.Prepare(config)
+	_, warns, err := b.Prepare(config)
 	if len(warns) > 0 {
 		t.Fatalf("bad: %#v", warns)
 	}
@@ -77,7 +77,7 @@ func TestBuilderPrepare_DiskSize(t *testing.T) {
 
 	config["disk_size"] = 60000
 	b = Builder{}
-	warns, err = b.Prepare(config)
+	_, warns, err = b.Prepare(config)
 	if len(warns) > 0 {
 		t.Fatalf("bad: %#v", warns)
 	}
@@ -95,7 +95,7 @@ func TestBuilderPrepare_FloppyFiles(t *testing.T) {
 	config := testConfig()
 
 	delete(config, "floppy_files")
-	warns, err := b.Prepare(config)
+	_, warns, err := b.Prepare(config)
 	if len(warns) > 0 {
 		t.Fatalf("bad: %#v", warns)
 	}
@@ -107,10 +107,10 @@ func TestBuilderPrepare_FloppyFiles(t *testing.T) {
 		t.Fatalf("bad: %#v", b.config.FloppyFiles)
 	}
 
-	floppies_path := "../../../common/test-fixtures/floppies"
+	floppies_path := "../../test-fixtures/floppies"
 	config["floppy_files"] = []string{fmt.Sprintf("%s/bar.bat", floppies_path), fmt.Sprintf("%s/foo.ps1", floppies_path)}
 	b = Builder{}
-	warns, err = b.Prepare(config)
+	_, warns, err = b.Prepare(config)
 	if len(warns) > 0 {
 		t.Fatalf("bad: %#v", warns)
 	}
@@ -128,14 +128,220 @@ func TestBuilderPrepare_InvalidFloppies(t *testing.T) {
 	var b Builder
 	config := testConfig()
 	config["floppy_files"] = []string{"nonexistent.bat", "nonexistent.ps1"}
+
 	b = Builder{}
-	_, errs := b.Prepare(config)
+	_, _, errs := b.Prepare(config)
 	if errs == nil {
 		t.Fatalf("Nonexistent floppies should trigger multierror")
 	}
 
-	if len(errs.(*packer.MultiError).Errors) != 2 {
+	if len(errs.(*packersdk.MultiError).Errors) != 2 {
 		t.Fatalf("Multierror should work and report 2 errors")
+	}
+}
+
+func TestBuilderPrepare_RemoteType(t *testing.T) {
+	var b Builder
+	config := testConfig()
+
+	config["format"] = "ovf"
+	config["remote_host"] = "foobar.example.com"
+	config["remote_password"] = "supersecret"
+	config["skip_validate_credentials"] = true
+	// Bad
+	config["remote_type"] = "foobar"
+	_, warns, err := b.Prepare(config)
+	if len(warns) > 0 {
+		t.Fatalf("bad: %#v", warns)
+	}
+	if err == nil {
+		t.Fatal("should have error")
+	}
+
+	config["remote_type"] = "esx5"
+	// Bad
+	config["remote_host"] = ""
+	b = Builder{}
+	_, warns, err = b.Prepare(config)
+	if len(warns) > 0 {
+		t.Fatalf("bad: %#v", warns)
+	}
+	if err == nil {
+		t.Fatal("should have error")
+	}
+
+	// Good
+	config["remote_type"] = ""
+	config["format"] = ""
+	config["remote_host"] = ""
+	config["remote_password"] = ""
+	config["remote_private_key_file"] = ""
+	b = Builder{}
+	_, warns, err = b.Prepare(config)
+	if len(warns) > 0 {
+		t.Fatalf("bad: %#v", warns)
+	}
+	if err != nil {
+		t.Fatalf("should not have error: %s", err)
+	}
+
+	// Good
+	config["remote_type"] = "esx5"
+	config["remote_host"] = "foobar.example.com"
+	config["remote_password"] = "supersecret"
+	b = Builder{}
+	_, warns, err = b.Prepare(config)
+	if len(warns) > 0 {
+		t.Fatalf("bad: %#v", warns)
+	}
+	if err != nil {
+		t.Fatalf("should not have error: %s", err)
+	}
+}
+
+func TestBuilderPrepare_Export(t *testing.T) {
+	type testCase struct {
+		InputConfigVals         map[string]string
+		ExpectedSkipExportValue bool
+		ExpectedFormat          string
+		ExpectedErr             bool
+		Reason                  string
+	}
+	testCases := []testCase{
+		{
+			InputConfigVals: map[string]string{
+				"remote_type": "",
+				"format":      "",
+			},
+			ExpectedSkipExportValue: true,
+			ExpectedFormat:          "vmx",
+			ExpectedErr:             false,
+			Reason:                  "should have defaulted format to vmx.",
+		},
+		{
+			InputConfigVals: map[string]string{
+				"remote_type":     "esx5",
+				"format":          "",
+				"remote_host":     "fakehost.com",
+				"remote_password": "fakepassword",
+				"remote_username": "fakeuser",
+			},
+			ExpectedSkipExportValue: false,
+			ExpectedFormat:          "ovf",
+			ExpectedErr:             false,
+			Reason:                  "should have defaulted format to ovf with remote set to esx5.",
+		},
+		{
+			InputConfigVals: map[string]string{
+				"remote_type": "esx5",
+				"format":      "",
+			},
+			ExpectedSkipExportValue: false,
+			ExpectedFormat:          "ovf",
+			ExpectedErr:             true,
+			Reason:                  "should have errored because remote host isn't set for remote build.",
+		},
+		{
+			InputConfigVals: map[string]string{
+				"remote_type":     "invalid",
+				"format":          "",
+				"remote_host":     "fakehost.com",
+				"remote_password": "fakepassword",
+				"remote_username": "fakeuser",
+			},
+			ExpectedSkipExportValue: false,
+			ExpectedFormat:          "ovf",
+			ExpectedErr:             true,
+			Reason:                  "should error with invalid remote type",
+		},
+		{
+			InputConfigVals: map[string]string{
+				"remote_type": "",
+				"format":      "invalid",
+			},
+			ExpectedSkipExportValue: false,
+			ExpectedFormat:          "invalid",
+			ExpectedErr:             true,
+			Reason:                  "should error with invalid format",
+		},
+		{
+			InputConfigVals: map[string]string{
+				"remote_type": "",
+				"format":      "ova",
+			},
+			ExpectedSkipExportValue: false,
+			ExpectedFormat:          "ova",
+			ExpectedErr:             false,
+			Reason:                  "should set user-given ova format",
+		},
+		{
+			InputConfigVals: map[string]string{
+				"remote_type":     "esx5",
+				"format":          "ova",
+				"remote_host":     "fakehost.com",
+				"remote_password": "fakepassword",
+				"remote_username": "fakeuser",
+			},
+			ExpectedSkipExportValue: false,
+			ExpectedFormat:          "ova",
+			ExpectedErr:             false,
+			Reason:                  "should set user-given ova format",
+		},
+	}
+	for _, tc := range testCases {
+		config := testConfig()
+		for k, v := range tc.InputConfigVals {
+			config[k] = v
+		}
+		config["skip_validate_credentials"] = true
+		outCfg := &Config{}
+		warns, errs := (outCfg).Prepare(config)
+
+		if len(warns) > 0 {
+			t.Fatalf("bad: %#v", warns)
+		}
+
+		if (errs != nil) != tc.ExpectedErr {
+			t.Fatalf("received error: \n %s \n but 'expected err' was %t", errs, tc.ExpectedErr)
+		}
+
+		if outCfg.Format != tc.ExpectedFormat {
+			t.Fatalf("Expected: %s. Actual: %s. Reason: %s", tc.ExpectedFormat,
+				outCfg.Format, tc.Reason)
+		}
+		if outCfg.SkipExport != tc.ExpectedSkipExportValue {
+			t.Fatalf("For SkipExport expected %t but recieved %t",
+				tc.ExpectedSkipExportValue, outCfg.SkipExport)
+		}
+	}
+}
+
+func TestBuilderPrepare_RemoteExport(t *testing.T) {
+	var b Builder
+	config := testConfig()
+
+	config["remote_type"] = "esx5"
+	config["remote_host"] = "foobar.example.com"
+	config["skip_validate_credentials"] = true
+	// Bad
+	config["remote_password"] = ""
+	_, warns, err := b.Prepare(config)
+	if len(warns) != 0 {
+		t.Fatalf("bad: %#v", warns)
+	}
+	if err == nil {
+		t.Fatal("should have error")
+	}
+
+	// Good
+	config["remote_password"] = "supersecret"
+	b = Builder{}
+	_, warns, err = b.Prepare(config)
+	if len(warns) != 0 {
+		t.Fatalf("err: %s", err)
+	}
+	if err != nil {
+		t.Fatalf("should not have error: %s", err)
 	}
 }
 
@@ -145,7 +351,7 @@ func TestBuilderPrepare_Format(t *testing.T) {
 
 	// Bad
 	config["format"] = "foobar"
-	warns, err := b.Prepare(config)
+	_, warns, err := b.Prepare(config)
 	if len(warns) > 0 {
 		t.Fatalf("bad: %#v", warns)
 	}
@@ -158,8 +364,13 @@ func TestBuilderPrepare_Format(t *testing.T) {
 	for _, format := range goodFormats {
 		// Good
 		config["format"] = format
+		config["remote_type"] = "esx5"
+		config["remote_host"] = "hosty.hostface"
+		config["remote_password"] = "password"
+		config["skip_validate_credentials"] = true
+
 		b = Builder{}
-		warns, err = b.Prepare(config)
+		_, warns, err = b.Prepare(config)
 		if len(warns) > 0 {
 			t.Fatalf("bad: %#v", warns)
 		}
@@ -175,7 +386,7 @@ func TestBuilderPrepare_InvalidKey(t *testing.T) {
 
 	// Add a random key
 	config["i_should_not_be_valid"] = true
-	warns, err := b.Prepare(config)
+	_, warns, err := b.Prepare(config)
 	if len(warns) > 0 {
 		t.Fatalf("bad: %#v", warns)
 	}
@@ -197,7 +408,7 @@ func TestBuilderPrepare_OutputDir(t *testing.T) {
 
 	config["output_directory"] = dir
 	b = Builder{}
-	warns, err := b.Prepare(config)
+	_, warns, err := b.Prepare(config)
 	if len(warns) > 0 {
 		t.Fatalf("bad: %#v", warns)
 	}
@@ -208,7 +419,7 @@ func TestBuilderPrepare_OutputDir(t *testing.T) {
 	// Test with a good one
 	config["output_directory"] = "i-hope-i-dont-exist"
 	b = Builder{}
-	warns, err = b.Prepare(config)
+	_, warns, err = b.Prepare(config)
 	if len(warns) > 0 {
 		t.Fatalf("bad: %#v", warns)
 	}
@@ -223,7 +434,7 @@ func TestBuilderPrepare_ToolsUploadPath(t *testing.T) {
 
 	// Test a default
 	delete(config, "tools_upload_path")
-	warns, err := b.Prepare(config)
+	_, warns, err := b.Prepare(config)
 	if len(warns) > 0 {
 		t.Fatalf("bad: %#v", warns)
 	}
@@ -238,7 +449,7 @@ func TestBuilderPrepare_ToolsUploadPath(t *testing.T) {
 	// Test with a bad value
 	config["tools_upload_path"] = "{{{nope}"
 	b = Builder{}
-	warns, err = b.Prepare(config)
+	_, warns, err = b.Prepare(config)
 	if len(warns) > 0 {
 		t.Fatalf("bad: %#v", warns)
 	}
@@ -249,7 +460,7 @@ func TestBuilderPrepare_ToolsUploadPath(t *testing.T) {
 	// Test with a good one
 	config["tools_upload_path"] = "hey"
 	b = Builder{}
-	warns, err = b.Prepare(config)
+	_, warns, err = b.Prepare(config)
 	if len(warns) > 0 {
 		t.Fatalf("bad: %#v", warns)
 	}
@@ -264,7 +475,7 @@ func TestBuilderPrepare_VMXTemplatePath(t *testing.T) {
 
 	// Test bad
 	config["vmx_template_path"] = "/i/dont/exist/forreal"
-	warns, err := b.Prepare(config)
+	_, warns, err := b.Prepare(config)
 	if len(warns) > 0 {
 		t.Fatalf("bad: %#v", warns)
 	}
@@ -286,7 +497,7 @@ func TestBuilderPrepare_VMXTemplatePath(t *testing.T) {
 
 	config["vmx_template_path"] = tf.Name()
 	b = Builder{}
-	warns, err = b.Prepare(config)
+	_, warns, err = b.Prepare(config)
 	if len(warns) > 0 {
 		t.Fatalf("bad: %#v", warns)
 	}
@@ -308,7 +519,7 @@ func TestBuilderPrepare_VMXTemplatePath(t *testing.T) {
 
 	config["vmx_template_path"] = tf2.Name()
 	b = Builder{}
-	warns, err = b.Prepare(config)
+	_, warns, err = b.Prepare(config)
 	if len(warns) > 0 {
 		t.Fatalf("bad: %#v", warns)
 	}
@@ -324,7 +535,7 @@ func TestBuilderPrepare_VNCPort(t *testing.T) {
 	// Bad
 	config["vnc_port_min"] = 1000
 	config["vnc_port_max"] = 500
-	warns, err := b.Prepare(config)
+	_, warns, err := b.Prepare(config)
 	if len(warns) > 0 {
 		t.Fatalf("bad: %#v", warns)
 	}
@@ -335,7 +546,7 @@ func TestBuilderPrepare_VNCPort(t *testing.T) {
 	// Bad
 	config["vnc_port_min"] = -500
 	b = Builder{}
-	warns, err = b.Prepare(config)
+	_, warns, err = b.Prepare(config)
 	if len(warns) > 0 {
 		t.Fatalf("bad: %#v", warns)
 	}
@@ -347,13 +558,38 @@ func TestBuilderPrepare_VNCPort(t *testing.T) {
 	config["vnc_port_min"] = 500
 	config["vnc_port_max"] = 1000
 	b = Builder{}
-	warns, err = b.Prepare(config)
+	_, warns, err = b.Prepare(config)
 	if len(warns) > 0 {
 		t.Fatalf("bad: %#v", warns)
 	}
 	if err != nil {
 		t.Fatalf("should not have error: %s", err)
 	}
+}
+
+func TestBuilderCheckCollisions(t *testing.T) {
+	config := testConfig()
+	config["vmx_data"] = map[string]string{
+		"no.collision":    "awesomesauce",
+		"ide0:0.fileName": "is a collision",
+		"displayName":     "also a collision",
+	}
+	{
+		var b Builder
+		_, warns, _ := b.Prepare(config)
+		if len(warns) != 1 {
+			t.Fatalf("Should have warning about two collisions.")
+		}
+	}
+	{
+		config["vmx_template_path"] = "some/path.vmx"
+		var b Builder
+		_, warns, _ := b.Prepare(config)
+		if len(warns) != 0 {
+			t.Fatalf("Should not check for collisions with custom template.")
+		}
+	}
+
 }
 
 func TestBuilderPrepare_CommConfig(t *testing.T) {
@@ -366,7 +602,7 @@ func TestBuilderPrepare_CommConfig(t *testing.T) {
 		config["winrm_host"] = "1.2.3.4"
 
 		var b Builder
-		warns, err := b.Prepare(config)
+		_, warns, err := b.Prepare(config)
 		if len(warns) > 0 {
 			t.Fatalf("bad: %#v", warns)
 		}
@@ -374,13 +610,13 @@ func TestBuilderPrepare_CommConfig(t *testing.T) {
 			t.Fatalf("should not have error: %s", err)
 		}
 
-		if b.config.CommConfig.WinRMUser != "username" {
-			t.Errorf("bad winrm_username: %s", b.config.CommConfig.WinRMUser)
+		if b.config.SSHConfig.Comm.WinRMUser != "username" {
+			t.Errorf("bad winrm_username: %s", b.config.SSHConfig.Comm.WinRMUser)
 		}
-		if b.config.CommConfig.WinRMPassword != "password" {
-			t.Errorf("bad winrm_password: %s", b.config.CommConfig.WinRMPassword)
+		if b.config.SSHConfig.Comm.WinRMPassword != "password" {
+			t.Errorf("bad winrm_password: %s", b.config.SSHConfig.Comm.WinRMPassword)
 		}
-		if host := b.config.CommConfig.Host(); host != "1.2.3.4" {
+		if host := b.config.SSHConfig.Comm.Host(); host != "1.2.3.4" {
 			t.Errorf("bad host: %s", host)
 		}
 	}
@@ -394,7 +630,7 @@ func TestBuilderPrepare_CommConfig(t *testing.T) {
 		config["ssh_host"] = "1.2.3.4"
 
 		var b Builder
-		warns, err := b.Prepare(config)
+		_, warns, err := b.Prepare(config)
 		if len(warns) > 0 {
 			t.Fatalf("bad: %#v", warns)
 		}
@@ -402,13 +638,13 @@ func TestBuilderPrepare_CommConfig(t *testing.T) {
 			t.Fatalf("should not have error: %s", err)
 		}
 
-		if b.config.CommConfig.SSHUsername != "username" {
-			t.Errorf("bad ssh_username: %s", b.config.CommConfig.SSHUsername)
+		if b.config.SSHConfig.Comm.SSHUsername != "username" {
+			t.Errorf("bad ssh_username: %s", b.config.SSHConfig.Comm.SSHUsername)
 		}
-		if b.config.CommConfig.SSHPassword != "password" {
-			t.Errorf("bad ssh_password: %s", b.config.CommConfig.SSHPassword)
+		if b.config.SSHConfig.Comm.SSHPassword != "password" {
+			t.Errorf("bad ssh_password: %s", b.config.SSHConfig.Comm.SSHPassword)
 		}
-		if host := b.config.CommConfig.Host(); host != "1.2.3.4" {
+		if host := b.config.SSHConfig.Comm.Host(); host != "1.2.3.4" {
 			t.Errorf("bad host: %s", host)
 		}
 	}

@@ -2,14 +2,13 @@ package chroot
 
 import (
 	"context"
-	"errors"
 	"fmt"
 	"time"
 
 	"github.com/aws/aws-sdk-go/service/ec2"
+	"github.com/hashicorp/packer-plugin-sdk/multistep"
+	packersdk "github.com/hashicorp/packer-plugin-sdk/packer"
 	awscommon "github.com/hashicorp/packer/builder/amazon/common"
-	"github.com/hashicorp/packer/helper/multistep"
-	"github.com/hashicorp/packer/packer"
 )
 
 // StepSnapshot creates a snapshot of the created volume.
@@ -17,12 +16,13 @@ import (
 // Produces:
 //   snapshot_id string - ID of the created snapshot
 type StepSnapshot struct {
-	snapshotId string
+	PollingConfig *awscommon.AWSPollingConfig
+	snapshotId    string
 }
 
-func (s *StepSnapshot) Run(_ context.Context, state multistep.StateBag) multistep.StepAction {
+func (s *StepSnapshot) Run(ctx context.Context, state multistep.StateBag) multistep.StepAction {
 	ec2conn := state.Get("ec2").(*ec2.EC2)
-	ui := state.Get("ui").(packer.Ui)
+	ui := state.Get("ui").(packersdk.Ui)
 	volumeId := state.Get("volume_id").(string)
 
 	ui.Say("Creating snapshot...")
@@ -44,26 +44,7 @@ func (s *StepSnapshot) Run(_ context.Context, state multistep.StateBag) multiste
 	ui.Message(fmt.Sprintf("Snapshot ID: %s", s.snapshotId))
 
 	// Wait for the snapshot to be ready
-	stateChange := awscommon.StateChangeConf{
-		Pending:   []string{"pending"},
-		StepState: state,
-		Target:    "completed",
-		Refresh: func() (interface{}, string, error) {
-			resp, err := ec2conn.DescribeSnapshots(&ec2.DescribeSnapshotsInput{SnapshotIds: []*string{&s.snapshotId}})
-			if err != nil {
-				return nil, "", err
-			}
-
-			if len(resp.Snapshots) == 0 {
-				return nil, "", errors.New("No snapshots found.")
-			}
-
-			s := resp.Snapshots[0]
-			return s, *s.State, nil
-		},
-	}
-
-	_, err = awscommon.WaitForState(&stateChange)
+	err = s.PollingConfig.WaitUntilSnapshotDone(ctx, ec2conn, s.snapshotId)
 	if err != nil {
 		err := fmt.Errorf("Error waiting for snapshot: %s", err)
 		state.Put("error", err)
@@ -91,7 +72,7 @@ func (s *StepSnapshot) Cleanup(state multistep.StateBag) {
 
 	if cancelled || halted {
 		ec2conn := state.Get("ec2").(*ec2.EC2)
-		ui := state.Get("ui").(packer.Ui)
+		ui := state.Get("ui").(packersdk.Ui)
 		ui.Say("Removing snapshot since we cancelled or halted...")
 		_, err := ec2conn.DeleteSnapshot(&ec2.DeleteSnapshotInput{SnapshotId: &s.snapshotId})
 		if err != nil {

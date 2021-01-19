@@ -6,7 +6,7 @@ import (
 	"os"
 	"testing"
 
-	"github.com/hashicorp/packer/packer"
+	packersdk "github.com/hashicorp/packer-plugin-sdk/packer"
 )
 
 func testConfig(t *testing.T) map[string]interface{} {
@@ -53,13 +53,13 @@ func TestNewConfig_sourcePath(t *testing.T) {
 	// Bad
 	c := testConfig(t)
 	delete(c, "source_path")
-	_, warns, errs := NewConfig(c)
+	warns, errs := (&Config{}).Prepare(c)
 	testConfigErr(t, warns, errs)
 
 	// Bad
 	c = testConfig(t)
 	c["source_path"] = "/i/dont/exist"
-	_, warns, errs = NewConfig(c)
+	warns, errs = (&Config{}).Prepare(c)
 	testConfigErr(t, warns, errs)
 
 	// Good
@@ -68,15 +68,15 @@ func TestNewConfig_sourcePath(t *testing.T) {
 
 	c = testConfig(t)
 	c["source_path"] = tf.Name()
-	_, warns, errs = NewConfig(c)
+	warns, errs = (&Config{}).Prepare(c)
 	testConfigOk(t, warns, errs)
 }
 
 func TestNewConfig_FloppyFiles(t *testing.T) {
 	c := testConfig(t)
-	floppies_path := "../../../common/test-fixtures/floppies"
+	floppies_path := "../../test-fixtures/floppies"
 	c["floppy_files"] = []string{fmt.Sprintf("%s/bar.bat", floppies_path), fmt.Sprintf("%s/foo.ps1", floppies_path)}
-	_, _, err := NewConfig(c)
+	_, err := (&Config{}).Prepare(c)
 	if err != nil {
 		t.Fatalf("should not have error: %s", err)
 	}
@@ -84,30 +84,30 @@ func TestNewConfig_FloppyFiles(t *testing.T) {
 
 func TestNewConfig_InvalidFloppies(t *testing.T) {
 	c := testConfig(t)
-	c["floppy_files"] = []string{"nonexistant.bat", "nonexistant.ps1"}
-	_, _, errs := NewConfig(c)
+	c["floppy_files"] = []string{"nonexistent.bat", "nonexistent.ps1"}
+	_, errs := (&Config{}).Prepare(c)
 	if errs == nil {
 		t.Fatalf("Nonexistent floppies should trigger multierror")
 	}
 
-	if len(errs.(*packer.MultiError).Errors) != 2 {
+	if len(errs.(*packersdk.MultiError).Errors) != 2 {
 		t.Fatalf("Multierror should work and report 2 errors")
 	}
 }
 
 func TestNewConfig_shutdown_timeout(t *testing.T) {
-	c := testConfig(t)
+	cfg := testConfig(t)
 	tf := getTempFile(t)
 	defer os.Remove(tf.Name())
 
 	// Expect this to fail
-	c["source_path"] = tf.Name()
-	c["shutdown_timeout"] = "NaN"
-	_, warns, errs := NewConfig(c)
+	cfg["source_path"] = tf.Name()
+	cfg["shutdown_timeout"] = "NaN"
+	warns, errs := (&Config{}).Prepare(cfg)
 	testConfigErr(t, warns, errs)
 
 	// Passes when given a valid time duration
-	c["shutdown_timeout"] = "10s"
-	_, warns, errs = NewConfig(c)
+	cfg["shutdown_timeout"] = "10s"
+	warns, errs = (&Config{}).Prepare(cfg)
 	testConfigOk(t, warns, errs)
 }

@@ -1,12 +1,12 @@
 package command
 
 import (
-	"fmt"
-	"log"
+	"context"
 	"strings"
 
 	"github.com/hashicorp/packer/packer"
-	"github.com/hashicorp/packer/template"
+
+	"github.com/posener/complete"
 )
 
 type ValidateCommand struct {
@@ -14,100 +14,65 @@ type ValidateCommand struct {
 }
 
 func (c *ValidateCommand) Run(args []string) int {
-	var cfgSyntaxOnly bool
+	ctx, cleanup := handleTermInterrupt(c.Ui)
+	defer cleanup()
+
+	cfg, ret := c.ParseArgs(args)
+	if ret != 0 {
+		return ret
+	}
+
+	return c.RunContext(ctx, cfg)
+}
+
+func (c *ValidateCommand) ParseArgs(args []string) (*ValidateArgs, int) {
+	var cfg ValidateArgs
+
 	flags := c.Meta.FlagSet("validate", FlagSetBuildFilter|FlagSetVars)
 	flags.Usage = func() { c.Ui.Say(c.Help()) }
-	flags.BoolVar(&cfgSyntaxOnly, "syntax-only", false, "check syntax only")
+	cfg.AddFlagSets(flags)
 	if err := flags.Parse(args); err != nil {
-		return 1
+		return &cfg, 1
 	}
 
 	args = flags.Args()
 	if len(args) != 1 {
 		flags.Usage()
-		return 1
+		return &cfg, 1
 	}
+	cfg.Path = args[0]
+	return &cfg, 0
+}
 
-	// Parse the template
-	tpl, err := template.ParseFile(args[0])
-	if err != nil {
-		c.Ui.Error(fmt.Sprintf("Failed to parse template: %s", err))
+func (c *ValidateCommand) RunContext(ctx context.Context, cla *ValidateArgs) int {
+	packerStarter, ret := c.GetConfig(&cla.MetaArgs)
+	if ret != 0 {
 		return 1
 	}
 
 	// If we're only checking syntax, then we're done already
-	if cfgSyntaxOnly {
+	if cla.SyntaxOnly {
 		c.Ui.Say("Syntax-only check passed. Everything looks okay.")
 		return 0
 	}
 
-	// Get the core
-	core, err := c.Meta.Core(tpl)
-	if err != nil {
-		c.Ui.Error(err.Error())
-		return 1
+	diags := packerStarter.Initialize()
+	ret = writeDiags(c.Ui, nil, diags)
+	if ret != 0 {
+		return ret
 	}
 
-	errs := make([]error, 0)
-	warnings := make(map[string][]string)
+	_, diags = packerStarter.GetBuilds(packer.GetBuildsOptions{
+		Only:   cla.Only,
+		Except: cla.Except,
+	})
 
-	// Get the builds we care about
-	buildNames := c.Meta.BuildNames(core)
-	builds := make([]packer.Build, 0, len(buildNames))
-	for _, n := range buildNames {
-		b, err := core.Build(n)
-		if err != nil {
-			c.Ui.Error(fmt.Sprintf(
-				"Failed to initialize build '%s': %s",
-				n, err))
-			return 1
-		}
+	fixerDiags := packerStarter.FixConfig(packer.FixConfigOptions{
+		Mode: packer.Diff,
+	})
+	diags = append(diags, fixerDiags...)
 
-		builds = append(builds, b)
-	}
-
-	// Check the configuration of all builds
-	for _, b := range builds {
-		log.Printf("Preparing build: %s", b.Name())
-		warns, err := b.Prepare()
-		if len(warns) > 0 {
-			warnings[b.Name()] = warns
-		}
-		if err != nil {
-			errs = append(errs, fmt.Errorf("Errors validating build '%s'. %s", b.Name(), err))
-		}
-	}
-
-	if len(errs) > 0 {
-		c.Ui.Error("Template validation failed. Errors are shown below.\n")
-		for i, err := range errs {
-			c.Ui.Error(err.Error())
-
-			if (i + 1) < len(errs) {
-				c.Ui.Error("")
-			}
-		}
-
-		return 1
-	}
-
-	if len(warnings) > 0 {
-		c.Ui.Say("Template validation succeeded, but there were some warnings.")
-		c.Ui.Say("These are ONLY WARNINGS, and Packer will attempt to build the")
-		c.Ui.Say("template despite them, but they should be paid attention to.\n")
-
-		for build, warns := range warnings {
-			c.Ui.Say(fmt.Sprintf("Warnings for build '%s':\n", build))
-			for _, warning := range warns {
-				c.Ui.Say(fmt.Sprintf("* %s", warning))
-			}
-		}
-
-		return 0
-	}
-
-	c.Ui.Say("Template validated successfully.")
-	return 0
+	return writeDiags(c.Ui, nil, diags)
 }
 
 func (*ValidateCommand) Help() string {
@@ -124,10 +89,10 @@ Usage: packer validate [options] TEMPLATE
 Options:
 
   -syntax-only           Only check syntax. Do not verify config of the template.
-  -except=foo,bar,baz    Validate all builds other than these
-  -only=foo,bar,baz      Validate only these builds
+  -except=foo,bar,baz    Validate all builds other than these.
+  -only=foo,bar,baz      Validate only these builds.
   -var 'key=value'       Variable for templates, can be used multiple times.
-  -var-file=path         JSON file containing user variables.
+  -var-file=path         JSON or HCL2 file containing user variables.
 `
 
 	return strings.TrimSpace(helpText)
@@ -135,4 +100,18 @@ Options:
 
 func (*ValidateCommand) Synopsis() string {
 	return "check that a template is valid"
+}
+
+func (*ValidateCommand) AutocompleteArgs() complete.Predictor {
+	return complete.PredictNothing
+}
+
+func (*ValidateCommand) AutocompleteFlags() complete.Flags {
+	return complete.Flags{
+		"-syntax-only": complete.PredictNothing,
+		"-except":      complete.PredictNothing,
+		"-only":        complete.PredictNothing,
+		"-var":         complete.PredictNothing,
+		"-var-file":    complete.PredictNothing,
+	}
 }

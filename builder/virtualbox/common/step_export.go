@@ -3,13 +3,11 @@ package common
 import (
 	"context"
 	"fmt"
-	"log"
 	"path/filepath"
 	"strings"
-	"time"
 
-	"github.com/hashicorp/packer/helper/multistep"
-	"github.com/hashicorp/packer/packer"
+	"github.com/hashicorp/packer-plugin-sdk/multistep"
+	packersdk "github.com/hashicorp/packer-plugin-sdk/packer"
 )
 
 // This step cleans up forwarded ports and exports the VM to an OVF.
@@ -21,15 +19,28 @@ import (
 type StepExport struct {
 	Format         string
 	OutputDir      string
+	OutputFilename string
 	ExportOpts     []string
+	Bundling       VBoxBundleConfig
 	SkipNatMapping bool
 	SkipExport     bool
 }
 
-func (s *StepExport) Run(_ context.Context, state multistep.StateBag) multistep.StepAction {
+func (s *StepExport) Run(ctx context.Context, state multistep.StateBag) multistep.StepAction {
+	// If ISO export is configured, ensure this option is propagated to VBoxManage.
+	for _, option := range s.ExportOpts {
+		if option == "--iso" || option == "-I" {
+			s.ExportOpts = append(s.ExportOpts, "--iso")
+			break
+		}
+	}
+
 	driver := state.Get("driver").(Driver)
-	ui := state.Get("ui").(packer.Ui)
+	ui := state.Get("ui").(packersdk.Ui)
 	vmName := state.Get("vmName").(string)
+	if s.OutputFilename == "" {
+		s.OutputFilename = vmName
+	}
 
 	// Skip export if requested
 	if s.SkipExport {
@@ -37,16 +48,13 @@ func (s *StepExport) Run(_ context.Context, state multistep.StateBag) multistep.
 		return multistep.ActionContinue
 	}
 
-	// Wait a second to ensure VM is really shutdown.
-	log.Println("1 second timeout to ensure VM is really shutdown")
-	time.Sleep(1 * time.Second)
 	ui.Say("Preparing to export machine...")
 
 	// Clear out the Packer-created forwarding rule
-	sshPort := state.Get("sshHostPort")
-	if !s.SkipNatMapping && sshPort != 0 {
+	commPort := state.Get("commHostPort")
+	if !s.SkipNatMapping && commPort != 0 {
 		ui.Message(fmt.Sprintf(
-			"Deleting forwarded port mapping for the communicator (SSH, WinRM, etc) (host port %d)", sshPort))
+			"Deleting forwarded port mapping for the communicator (SSH, WinRM, etc) (host port %d)", commPort))
 		command := []string{"modifyvm", vmName, "--natpf1", "delete", "packercomm"}
 		if err := driver.VBoxManage(command...); err != nil {
 			err := fmt.Errorf("Error deleting port forwarding rule: %s", err)
@@ -57,7 +65,7 @@ func (s *StepExport) Run(_ context.Context, state multistep.StateBag) multistep.
 	}
 
 	// Export the VM to an OVF
-	outputPath := filepath.Join(s.OutputDir, vmName+"."+s.Format)
+	outputPath := filepath.Join(s.OutputDir, s.OutputFilename+"."+s.Format)
 
 	command := []string{
 		"export",

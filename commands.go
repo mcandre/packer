@@ -18,7 +18,10 @@ const OutputPrefix = "o:"
 func init() {
 	Commands = map[string]cli.CommandFactory{
 		"build": func() (cli.Command, error) {
-			return &command.BuildCommand{
+			return &command.BuildCommand{Meta: *CommandMeta}, nil
+		},
+		"console": func() (cli.Command, error) {
+			return &command.ConsoleCommand{
 				Meta: *CommandMeta,
 			}, nil
 		},
@@ -29,14 +32,26 @@ func init() {
 			}, nil
 		},
 
+		"fmt": func() (cli.Command, error) {
+			return &command.FormatCommand{
+				Meta: *CommandMeta,
+			}, nil
+		},
+
+		"hcl2_upgrade": func() (cli.Command, error) {
+			return &command.HCL2UpgradeCommand{
+				Meta: *CommandMeta,
+			}, nil
+		},
+
 		"inspect": func() (cli.Command, error) {
 			return &command.InspectCommand{
 				Meta: *CommandMeta,
 			}, nil
 		},
 
-		"push": func() (cli.Command, error) {
-			return &command.PushCommand{
+		"plugin": func() (cli.Command, error) {
+			return &command.PluginCommand{
 				Meta: *CommandMeta,
 			}, nil
 		},
@@ -51,12 +66,6 @@ func init() {
 			return &command.VersionCommand{
 				Meta:      *CommandMeta,
 				CheckFunc: commandVersionCheck,
-			}, nil
-		},
-
-		"plugin": func() (cli.Command, error) {
-			return &command.PluginCommand{
-				Meta: *CommandMeta,
 			}, nil
 		},
 	}

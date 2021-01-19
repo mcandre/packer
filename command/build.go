@@ -2,77 +2,170 @@ package command
 
 import (
 	"bytes"
+	"context"
 	"fmt"
 	"log"
-	"os"
-	"os/signal"
+	"math"
 	"strconv"
 	"strings"
 	"sync"
-	"syscall"
+	"time"
 
-	"github.com/hashicorp/packer/helper/enumflag"
+	"github.com/hashicorp/hcl/v2"
+	"github.com/hashicorp/hcl/v2/hclparse"
+	packersdk "github.com/hashicorp/packer-plugin-sdk/packer"
+	"github.com/hashicorp/packer-plugin-sdk/template"
+	"github.com/hashicorp/packer/hcl2template"
 	"github.com/hashicorp/packer/packer"
-	"github.com/hashicorp/packer/template"
+	"github.com/hashicorp/packer/version"
+	"golang.org/x/sync/semaphore"
+
+	"github.com/hako/durafmt"
+	"github.com/posener/complete"
 )
 
 type BuildCommand struct {
 	Meta
 }
 
-func (c BuildCommand) Run(args []string) int {
-	var cfgColor, cfgDebug, cfgForce, cfgParallel bool
-	var cfgOnError string
+func (c *BuildCommand) Run(args []string) int {
+	ctx, cleanup := handleTermInterrupt(c.Ui)
+	defer cleanup()
+
+	cfg, ret := c.ParseArgs(args)
+	if ret != 0 {
+		return ret
+	}
+
+	return c.RunContext(ctx, cfg)
+}
+
+func (c *BuildCommand) ParseArgs(args []string) (*BuildArgs, int) {
+	var cfg BuildArgs
 	flags := c.Meta.FlagSet("build", FlagSetBuildFilter|FlagSetVars)
 	flags.Usage = func() { c.Ui.Say(c.Help()) }
-	flags.BoolVar(&cfgColor, "color", true, "")
-	flags.BoolVar(&cfgDebug, "debug", false, "")
-	flags.BoolVar(&cfgForce, "force", false, "")
-	flagOnError := enumflag.New(&cfgOnError, "cleanup", "abort", "ask")
-	flags.Var(flagOnError, "on-error", "")
-	flags.BoolVar(&cfgParallel, "parallel", true, "")
+	cfg.AddFlagSets(flags)
 	if err := flags.Parse(args); err != nil {
-		return 1
+		return &cfg, 1
+	}
+
+	if cfg.ParallelBuilds < 1 {
+		cfg.ParallelBuilds = math.MaxInt64
 	}
 
 	args = flags.Args()
 	if len(args) != 1 {
 		flags.Usage()
+		return &cfg, 1
+	}
+	cfg.Path = args[0]
+	return &cfg, 0
+}
+
+func (m *Meta) GetConfigFromHCL(cla *MetaArgs) (*hcl2template.PackerConfig, int) {
+	parser := &hcl2template.Parser{
+		CorePackerVersion:       version.SemVer,
+		CorePackerVersionString: version.FormattedVersion(),
+		Parser:                  hclparse.NewParser(),
+		BuilderSchemas:          m.CoreConfig.Components.BuilderStore,
+		ProvisionersSchemas:     m.CoreConfig.Components.ProvisionerStore,
+		PostProcessorsSchemas:   m.CoreConfig.Components.PostProcessorStore,
+	}
+	cfg, diags := parser.Parse(cla.Path, cla.VarFiles, cla.Vars)
+	return cfg, writeDiags(m.Ui, parser.Files(), diags)
+}
+
+func writeDiags(ui packersdk.Ui, files map[string]*hcl.File, diags hcl.Diagnostics) int {
+	// write HCL errors/diagnostics if any.
+	b := bytes.NewBuffer(nil)
+	err := hcl.NewDiagnosticTextWriter(b, files, 80, false).WriteDiagnostics(diags)
+	if err != nil {
+		ui.Error("could not write diagnostic: " + err.Error())
 		return 1
 	}
+	if b.Len() != 0 {
+		if diags.HasErrors() {
+			ui.Error(b.String())
+			return 1
+		}
+		ui.Say(b.String())
+	}
+	return 0
+}
 
+func (m *Meta) GetConfig(cla *MetaArgs) (packer.Handler, int) {
+	cfgType, err := cla.GetConfigType()
+	if err != nil {
+		m.Ui.Error(fmt.Sprintf("%q: %s", cla.Path, err))
+		return nil, 1
+	}
+
+	switch cfgType {
+	case ConfigTypeHCL2:
+		// TODO(azr): allow to pass a slice of files here.
+		return m.GetConfigFromHCL(cla)
+	default:
+		// TODO: uncomment once we've polished HCL a bit more.
+		// c.Ui.Say(`Legacy JSON Configuration Will Be Used.
+		// The template will be parsed in the legacy configuration style. This style
+		// will continue to work but users are encouraged to move to the new style.
+		// See: https://packer.io/guides/hcl
+		// `)
+		return m.GetConfigFromJSON(cla)
+	}
+}
+
+func (m *Meta) GetConfigFromJSON(cla *MetaArgs) (packer.Handler, int) {
 	// Parse the template
 	var tpl *template.Template
 	var err error
-	tpl, err = template.ParseFile(args[0])
+	if cla.Path == "" {
+		// here cla validation passed so this means we want a default builder
+		// and we probably are in the console command
+		tpl, err = template.Parse(TiniestBuilder)
+	} else {
+		tpl, err = template.ParseFile(cla.Path)
+	}
+
 	if err != nil {
-		c.Ui.Error(fmt.Sprintf("Failed to parse template: %s", err))
-		return 1
+		m.Ui.Error(fmt.Sprintf("Failed to parse template: %s", err))
+		return nil, 1
 	}
 
 	// Get the core
-	core, err := c.Meta.Core(tpl)
+	core, err := m.Core(tpl, cla)
+	ret := 0
 	if err != nil {
-		c.Ui.Error(err.Error())
-		return 1
+		m.Ui.Error(err.Error())
+		ret = 1
+	}
+	return &CoreWrapper{core}, ret
+}
+
+func (c *BuildCommand) RunContext(buildCtx context.Context, cla *BuildArgs) int {
+	packerStarter, ret := c.GetConfig(&cla.MetaArgs)
+	if ret != 0 {
+		return ret
+	}
+	diags := packerStarter.Initialize()
+	ret = writeDiags(c.Ui, nil, diags)
+	if ret != 0 {
+		return ret
 	}
 
-	// Get the builds we care about
-	buildNames := c.Meta.BuildNames(core)
-	builds := make([]packer.Build, 0, len(buildNames))
-	for _, n := range buildNames {
-		b, err := core.Build(n)
-		if err != nil {
-			c.Ui.Error(fmt.Sprintf(
-				"Failed to initialize build '%s': %s",
-				n, err))
-			continue
-		}
+	builds, diags := packerStarter.GetBuilds(packer.GetBuildsOptions{
+		Only:    cla.Only,
+		Except:  cla.Except,
+		Debug:   cla.Debug,
+		Force:   cla.Force,
+		OnError: cla.OnError,
+	})
 
-		builds = append(builds, b)
-	}
+	// here, something could have gone wrong but we still want to run valid
+	// builds.
+	ret = writeDiags(c.Ui, nil, diags)
 
-	if cfgDebug {
+	if cla.Debug {
 		c.Ui.Say("Debug mode enabled. Builds will not be parallelized.")
 	}
 
@@ -84,117 +177,113 @@ func (c BuildCommand) Run(args []string) int {
 		packer.UiColorYellow,
 		packer.UiColorBlue,
 	}
-	buildUis := make(map[string]packer.Ui)
-	for i, b := range buildNames {
-		var ui packer.Ui
-		ui = c.Ui
-		if cfgColor {
-			ui = &packer.ColoredUi{
-				Color: colors[i%len(colors)],
-				Ui:    ui,
-			}
+	buildUis := make(map[packersdk.Build]packersdk.Ui)
+	for i := range builds {
+		ui := c.Ui
+		if cla.Color {
+			// Only set up UI colors if -machine-readable isn't set.
 			if _, ok := c.Ui.(*packer.MachineReadableUi); !ok {
-				ui.Say(fmt.Sprintf("%s output will be in this color.", b))
-				if i+1 == len(buildNames) {
+				ui = &packer.ColoredUi{
+					Color: colors[i%len(colors)],
+					Ui:    ui,
+				}
+				ui.Say(fmt.Sprintf("%s: output will be in this color.", builds[i].Name()))
+				if i+1 == len(builds) {
 					// Add a newline between the color output and the actual output
 					c.Ui.Say("")
 				}
 			}
 		}
-
-		buildUis[b] = ui
-	}
-
-	log.Printf("Build debug mode: %v", cfgDebug)
-	log.Printf("Force build: %v", cfgForce)
-	log.Printf("On error: %v", cfgOnError)
-
-	// Set the debug and force mode and prepare all the builds
-	for _, b := range builds {
-		log.Printf("Preparing build: %s", b.Name())
-		b.SetDebug(cfgDebug)
-		b.SetForce(cfgForce)
-		b.SetOnError(cfgOnError)
-
-		warnings, err := b.Prepare()
-		if err != nil {
-			c.Ui.Error(err.Error())
-			return 1
-		}
-		if len(warnings) > 0 {
-			ui := buildUis[b.Name()]
-			ui.Say(fmt.Sprintf("Warnings for build '%s':\n", b.Name()))
-			for _, warning := range warnings {
-				ui.Say(fmt.Sprintf("* %s", warning))
+		// Now add timestamps if requested
+		if cla.TimestampUi {
+			ui = &packer.TimestampedUi{
+				Ui: ui,
 			}
-			ui.Say("")
 		}
+
+		buildUis[builds[i]] = ui
 	}
+
+	log.Printf("Build debug mode: %v", cla.Debug)
+	log.Printf("Force build: %v", cla.Force)
+	log.Printf("On error: %v", cla.OnError)
+
+	// Get the start of the build command
+	buildCommandStart := time.Now()
 
 	// Run all the builds in parallel and wait for them to complete
-	var interruptWg, wg sync.WaitGroup
-	interrupted := false
+	var wg sync.WaitGroup
 	var artifacts = struct {
 		sync.RWMutex
-		m map[string][]packer.Artifact
-	}{m: make(map[string][]packer.Artifact)}
-	errors := make(map[string]error)
-	// ctx := context.Background()
-	for _, b := range builds {
+		m map[string][]packersdk.Artifact
+	}{m: make(map[string][]packersdk.Artifact)}
+	// Get the builds we care about
+	var errors = struct {
+		sync.RWMutex
+		m map[string]error
+	}{m: make(map[string]error)}
+	limitParallel := semaphore.NewWeighted(cla.ParallelBuilds)
+	for i := range builds {
+		if err := buildCtx.Err(); err != nil {
+			log.Println("Interrupted, not going to start any more builds.")
+			break
+		}
+
+		b := builds[i]
+		name := b.Name()
+		ui := buildUis[b]
+		if err := limitParallel.Acquire(buildCtx, 1); err != nil {
+			ui.Error(fmt.Sprintf("Build '%s' failed to acquire semaphore: %s", name, err))
+			errors.Lock()
+			errors.m[name] = err
+			errors.Unlock()
+			break
+		}
 		// Increment the waitgroup so we wait for this item to finish properly
 		wg.Add(1)
-		// buildCtx, cancelCtx := ctx.WithCancel()
-
-		// Handle interrupts for this build
-		sigCh := make(chan os.Signal, 1)
-		signal.Notify(sigCh, os.Interrupt, syscall.SIGTERM)
-		defer signal.Stop(sigCh)
-		go func(b packer.Build) {
-			<-sigCh
-			interruptWg.Add(1)
-			defer interruptWg.Done()
-			interrupted = true
-
-			log.Printf("Stopping build: %s", b.Name())
-			b.Cancel()
-			//cancelCtx()
-			log.Printf("Build cancelled: %s", b.Name())
-		}(b)
 
 		// Run the build in a goroutine
-		go func(b packer.Build) {
+		go func() {
+			// Get the start of the build
+			buildStart := time.Now()
+
 			defer wg.Done()
 
-			name := b.Name()
+			defer limitParallel.Release(1)
+
 			log.Printf("Starting build run: %s", name)
-			ui := buildUis[name]
-			runArtifacts, err := b.Run(ui, c.Cache)
+			runArtifacts, err := b.Run(buildCtx, ui)
+
+			// Get the duration of the build and parse it
+			buildEnd := time.Now()
+			buildDuration := buildEnd.Sub(buildStart)
+			fmtBuildDuration := durafmt.Parse(buildDuration).LimitFirstN(2)
 
 			if err != nil {
-				ui.Error(fmt.Sprintf("Build '%s' errored: %s", name, err))
-				errors[name] = err
+				ui.Error(fmt.Sprintf("Build '%s' errored after %s: %s", name, fmtBuildDuration, err))
+				errors.Lock()
+				errors.m[name] = err
+				errors.Unlock()
 			} else {
-				ui.Say(fmt.Sprintf("Build '%s' finished.", name))
-				artifacts.Lock()
-				artifacts.m[name] = runArtifacts
-				artifacts.Unlock()
+				ui.Say(fmt.Sprintf("Build '%s' finished after %s.", name, fmtBuildDuration))
+				if nil != runArtifacts {
+					artifacts.Lock()
+					artifacts.m[name] = runArtifacts
+					artifacts.Unlock()
+				}
 			}
-		}(b)
+		}()
 
-		if cfgDebug {
+		if cla.Debug {
 			log.Printf("Debug enabled, so waiting for build to finish: %s", b.Name())
 			wg.Wait()
 		}
 
-		if !cfgParallel {
+		if cla.ParallelBuilds == 1 {
 			log.Printf("Parallelization disabled, waiting for build to finish: %s", b.Name())
 			wg.Wait()
 		}
 
-		if interrupted {
-			log.Println("Interrupted, not going to start any more builds.")
-			break
-		}
 	}
 
 	// Wait for both the builds to complete and the interrupt handler,
@@ -202,19 +291,22 @@ func (c BuildCommand) Run(args []string) int {
 	log.Printf("Waiting on builds to complete...")
 	wg.Wait()
 
-	log.Printf("Builds completed. Waiting on interrupt barrier...")
-	interruptWg.Wait()
+	// Get the duration of the buildCommand command and parse it
+	buildCommandEnd := time.Now()
+	buildCommandDuration := buildCommandEnd.Sub(buildCommandStart)
+	fmtBuildCommandDuration := durafmt.Parse(buildCommandDuration).LimitFirstN(2)
+	c.Ui.Say(fmt.Sprintf("\n==> Wait completed after %s", fmtBuildCommandDuration))
 
-	if interrupted {
+	if err := buildCtx.Err(); err != nil {
 		c.Ui.Say("Cleanly cancelled builds after being interrupted.")
 		return 1
 	}
 
-	if len(errors) > 0 {
-		c.Ui.Machine("error-count", strconv.FormatInt(int64(len(errors)), 10))
+	if len(errors.m) > 0 {
+		c.Ui.Machine("error-count", strconv.FormatInt(int64(len(errors.m)), 10))
 
 		c.Ui.Error("\n==> Some builds didn't complete successfully and had errors:")
-		for name, err := range errors {
+		for name, err := range errors.m {
 			// Create a UI for the machine readable stuff to be targeted
 			ui := &packer.TargetedUI{
 				Target: name,
@@ -275,15 +367,15 @@ func (c BuildCommand) Run(args []string) int {
 		c.Ui.Say("\n==> Builds finished but no artifacts were created.")
 	}
 
-	if len(errors) > 0 {
+	if len(errors.m) > 0 {
 		// If any errors occurred, exit with a non-zero exit status
-		return 1
+		ret = 1
 	}
 
-	return 0
+	return ret
 }
 
-func (BuildCommand) Help() string {
+func (*BuildCommand) Help() string {
 	helpText := `
 Usage: packer build [options] TEMPLATE
 
@@ -292,21 +384,42 @@ Usage: packer build [options] TEMPLATE
 
 Options:
 
-  -color=false               Disable color output (on by default)
-  -debug                     Debug mode enabled for builds
-  -except=foo,bar,baz        Build all builds other than these
-  -only=foo,bar,baz          Build only the specified builds
-  -force                     Force a build to continue if artifacts exist, deletes existing artifacts
-  -machine-readable          Machine-readable output
-  -on-error=[cleanup|abort|ask] If the build fails do: clean up (default), abort, or ask
-  -parallel=false            Disable parallelization (on by default)
-  -var 'key=value'           Variable for templates, can be used multiple times.
-  -var-file=path             JSON file containing user variables.
+  -color=false                  Disable color output. (Default: color)
+  -debug                        Debug mode enabled for builds.
+  -except=foo,bar,baz           Run all builds and post-processors other than these.
+  -only=foo,bar,baz             Build only the specified builds.
+  -force                        Force a build to continue if artifacts exist, deletes existing artifacts.
+  -machine-readable             Produce machine-readable output.
+  -on-error=[cleanup|abort|ask|run-cleanup-provisioner] If the build fails do: clean up (default), abort, ask, or run-cleanup-provisioner.
+  -parallel-builds=1            Number of builds to run in parallel. 1 disables parallelization. 0 means no limit (Default: 0)
+  -timestamp-ui                 Enable prefixing of each ui output with an RFC3339 timestamp.
+  -var 'key=value'              Variable for templates, can be used multiple times.
+  -var-file=path                JSON or HCL2 file containing user variables.
 `
 
 	return strings.TrimSpace(helpText)
 }
 
-func (BuildCommand) Synopsis() string {
+func (*BuildCommand) Synopsis() string {
 	return "build image(s) from template"
+}
+
+func (*BuildCommand) AutocompleteArgs() complete.Predictor {
+	return complete.PredictNothing
+}
+
+func (*BuildCommand) AutocompleteFlags() complete.Flags {
+	return complete.Flags{
+		"-color":            complete.PredictNothing,
+		"-debug":            complete.PredictNothing,
+		"-except":           complete.PredictNothing,
+		"-only":             complete.PredictNothing,
+		"-force":            complete.PredictNothing,
+		"-machine-readable": complete.PredictNothing,
+		"-on-error":         complete.PredictNothing,
+		"-parallel":         complete.PredictNothing,
+		"-timestamp-ui":     complete.PredictNothing,
+		"-var":              complete.PredictNothing,
+		"-var-file":         complete.PredictNothing,
+	}
 }

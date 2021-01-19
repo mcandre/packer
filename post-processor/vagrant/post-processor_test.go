@@ -3,12 +3,13 @@ package vagrant
 import (
 	"bytes"
 	"compress/flate"
+	"context"
 	"io/ioutil"
 	"os"
 	"strings"
 	"testing"
 
-	"github.com/hashicorp/packer/packer"
+	packersdk "github.com/hashicorp/packer-plugin-sdk/packer"
 )
 
 func testConfig() map[string]interface{} {
@@ -24,15 +25,15 @@ func testPP(t *testing.T) *PostProcessor {
 	return &p
 }
 
-func testUi() *packer.BasicUi {
-	return &packer.BasicUi{
+func testUi() *packersdk.BasicUi {
+	return &packersdk.BasicUi{
 		Reader: new(bytes.Buffer),
 		Writer: new(bytes.Buffer),
 	}
 }
 
 func TestPostProcessor_ImplementsPostProcessor(t *testing.T) {
-	var _ packer.PostProcessor = new(PostProcessor)
+	var _ packersdk.PostProcessor = new(PostProcessor)
 }
 
 func TestPostProcessorPrepare_compressionLevel(t *testing.T) {
@@ -45,7 +46,7 @@ func TestPostProcessorPrepare_compressionLevel(t *testing.T) {
 		t.Fatalf("err: %s", err)
 	}
 
-	config := p.configs[""]
+	config := p.config
 	if config.CompressionLevel != flate.DefaultCompression {
 		t.Fatalf("bad: %#v", config.CompressionLevel)
 	}
@@ -57,7 +58,7 @@ func TestPostProcessorPrepare_compressionLevel(t *testing.T) {
 		t.Fatalf("err: %s", err)
 	}
 
-	config = p.configs[""]
+	config = p.config
 	if config.CompressionLevel != 7 {
 		t.Fatalf("bad: %#v", config.CompressionLevel)
 	}
@@ -82,43 +83,48 @@ func TestPostProcessorPrepare_outputPath(t *testing.T) {
 	}
 }
 
-func TestPostProcessorPrepare_subConfigs(t *testing.T) {
+func TestSpecificConfig(t *testing.T) {
 	var p PostProcessor
-
-	f, err := ioutil.TempFile("", "packer")
-	if err != nil {
-		t.Fatalf("err: %s", err)
-	}
-	defer os.Remove(f.Name())
 
 	// Default
 	c := testConfig()
-	c["compression_level"] = 42
-	c["vagrantfile_template"] = f.Name()
+	c["compression_level"] = 1
+	c["output"] = "folder"
 	c["override"] = map[string]interface{}{
 		"aws": map[string]interface{}{
 			"compression_level": 7,
 		},
 	}
-	err = p.Configure(c)
+	if err := p.Configure(c); err != nil {
+		t.Fatalf("err: %s", err)
+	}
+
+	// overrides config
+	config, err := p.specificConfig("aws")
 	if err != nil {
 		t.Fatalf("err: %s", err)
 	}
 
-	if p.configs[""].CompressionLevel != 42 {
-		t.Fatalf("bad: %#v", p.configs[""].CompressionLevel)
+	if config.CompressionLevel != 7 {
+		t.Fatalf("bad: %#v", config.CompressionLevel)
 	}
 
-	if p.configs[""].VagrantfileTemplate != f.Name() {
-		t.Fatalf("bad: %#v", p.configs[""].VagrantfileTemplate)
+	if config.OutputPath != "folder" {
+		t.Fatalf("bad: %#v", config.OutputPath)
 	}
 
-	if p.configs["aws"].CompressionLevel != 7 {
-		t.Fatalf("bad: %#v", p.configs["aws"].CompressionLevel)
+	// does NOT overrides config
+	config, err = p.specificConfig("virtualbox")
+	if err != nil {
+		t.Fatalf("err: %s", err)
 	}
 
-	if p.configs["aws"].VagrantfileTemplate != f.Name() {
-		t.Fatalf("bad: %#v", p.configs["aws"].VagrantfileTemplate)
+	if config.CompressionLevel != 1 {
+		t.Fatalf("bad: %#v", config.CompressionLevel)
+	}
+
+	if config.OutputPath != "folder" {
+		t.Fatalf("bad: %#v", config.OutputPath)
 	}
 }
 
@@ -136,22 +142,52 @@ func TestPostProcessorPrepare_vagrantfileTemplateExists(t *testing.T) {
 		t.Fatalf("err: %s", err)
 	}
 
+	var p PostProcessor
+
+	if err := p.Configure(c); err != nil {
+		t.Fatal("no error expected as vagrantfile_template exists")
+	}
+
 	if err := os.Remove(name); err != nil {
 		t.Fatalf("err: %s", err)
 	}
 
-	var p PostProcessor
 	if err := p.Configure(c); err == nil {
-		t.Fatal("expected an error since vagrantfile_template does not exist")
+		t.Fatal("expected error since vagrantfile_template does not exist and vagrantfile_template_generated is unset")
+	}
+
+	// The vagrantfile_template will be generated during the build process
+	c["vagrantfile_template_generated"] = true
+
+	if err := p.Configure(c); err != nil {
+		t.Fatal("no error expected due to missing vagrantfile_template as vagrantfile_template_generated is set")
+	}
+}
+
+func TestPostProcessorPrepare_ProviderOverrideExists(t *testing.T) {
+	c := testConfig()
+	c["provider_override"] = "foo"
+
+	var p PostProcessor
+
+	if err := p.Configure(c); err == nil {
+		t.Fatal("Should have errored since foo is not a valid vagrant provider")
+	}
+
+	c = testConfig()
+	c["provider_override"] = "aws"
+
+	if err := p.Configure(c); err != nil {
+		t.Fatal("Should not have errored since aws is a valid vagrant provider")
 	}
 }
 
 func TestPostProcessorPostProcess_badId(t *testing.T) {
-	artifact := &packer.MockArtifact{
+	artifact := &packersdk.MockArtifact{
 		BuilderIdValue: "invalid.packer",
 	}
 
-	_, _, err := testPP(t).PostProcess(testUi(), artifact)
+	_, _, _, err := testPP(t).PostProcess(context.Background(), testUi(), artifact)
 	if !strings.Contains(err.Error(), "artifact type") {
 		t.Fatalf("err: %s", err)
 	}
@@ -178,10 +214,10 @@ func TestPostProcessorPostProcess_vagrantfileUserVariable(t *testing.T) {
 		t.Fatalf("err: %s", err)
 	}
 
-	a := &packer.MockArtifact{
+	a := &packersdk.MockArtifact{
 		BuilderIdValue: "packer.parallels",
 	}
-	a2, _, err := p.PostProcess(testUi(), a)
+	a2, _, _, err := p.PostProcess(context.Background(), testUi(), a)
 	if a2 != nil {
 		for _, fn := range a2.Files() {
 			defer os.Remove(fn)

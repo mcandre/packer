@@ -4,7 +4,7 @@ import (
 	"os"
 	"testing"
 
-	"github.com/hashicorp/packer/packer"
+	packersdk "github.com/hashicorp/packer-plugin-sdk/packer"
 )
 
 func testConfig() map[string]interface{} {
@@ -24,7 +24,7 @@ func TestBuilderPrepare_ConfigFile(t *testing.T) {
 	var b Builder
 	// Good
 	config := testConfig()
-	warnings, err := b.Prepare(config)
+	_, warnings, err := b.Prepare(config)
 	if len(warnings) > 0 {
 		t.Fatalf("bad: %#v", warnings)
 	}
@@ -35,7 +35,7 @@ func TestBuilderPrepare_ConfigFile(t *testing.T) {
 	// Good, remote image
 	config = testConfig()
 	config["image"] = "remote:bar"
-	warnings, err = b.Prepare(config)
+	_, warnings, err = b.Prepare(config)
 	if len(warnings) > 0 {
 		t.Fatalf("bad: %#v", warnings)
 	}
@@ -46,7 +46,7 @@ func TestBuilderPrepare_ConfigFile(t *testing.T) {
 	// Good, remote output image
 	config = testConfig()
 	config["output_image"] = "remote:foo"
-	warnings, err = b.Prepare(config)
+	_, warnings, err = b.Prepare(config)
 	if len(warnings) > 0 {
 		t.Fatalf("bad: %#v", warnings)
 	}
@@ -58,7 +58,7 @@ func TestBuilderPrepare_ConfigFile(t *testing.T) {
 	config = testConfig()
 	delete(config, "image")
 	b = Builder{}
-	warnings, err = b.Prepare(config)
+	_, warnings, err = b.Prepare(config)
 	if len(warnings) > 0 {
 		t.Fatalf("bad: %#v", warnings)
 	}
@@ -71,7 +71,7 @@ func TestBuilderPrepare_ConfigFile(t *testing.T) {
 func TestBuilder_ImplementsBuilder(t *testing.T) {
 	var raw interface{}
 	raw = &Builder{}
-	if _, ok := raw.(packer.Builder); !ok {
+	if _, ok := raw.(packersdk.Builder); !ok {
 		t.Fatalf("Builder should be a builder")
 	}
 }

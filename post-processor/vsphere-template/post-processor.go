@@ -1,3 +1,5 @@
+//go:generate mapstructure-to-hcl2 -type Config
+
 package vsphere_template
 
 import (
@@ -8,29 +10,39 @@ import (
 	"strings"
 	"time"
 
-	"github.com/hashicorp/packer/builder/vmware/iso"
-	"github.com/hashicorp/packer/common"
-	"github.com/hashicorp/packer/helper/config"
-	"github.com/hashicorp/packer/helper/multistep"
-	"github.com/hashicorp/packer/packer"
-	"github.com/hashicorp/packer/post-processor/vsphere"
-	"github.com/hashicorp/packer/template/interpolate"
+	"github.com/hashicorp/hcl/v2/hcldec"
+	"github.com/hashicorp/packer-plugin-sdk/common"
+	"github.com/hashicorp/packer-plugin-sdk/multistep"
+	"github.com/hashicorp/packer-plugin-sdk/multistep/commonsteps"
+	packersdk "github.com/hashicorp/packer-plugin-sdk/packer"
+	"github.com/hashicorp/packer-plugin-sdk/template/config"
+	"github.com/hashicorp/packer-plugin-sdk/template/interpolate"
+	vmwcommon "github.com/hashicorp/packer/builder/vmware/common"
+	vsphere "github.com/hashicorp/packer/builder/vsphere/common"
+	"github.com/hashicorp/packer/post-processor/artifice"
+	vspherepost "github.com/hashicorp/packer/post-processor/vsphere"
 	"github.com/vmware/govmomi"
 )
 
 var builtins = map[string]string{
-	vsphere.BuilderId: "vmware",
-	iso.BuilderIdESX:  "vmware",
+	vspherepost.BuilderId:  "vmware",
+	vmwcommon.BuilderIdESX: "vmware",
+	vsphere.BuilderId:      "vsphere",
+	artifice.BuilderId:     "artifice",
 }
 
 type Config struct {
 	common.PackerConfig `mapstructure:",squash"`
-	Host                string `mapstructure:"host"`
-	Insecure            bool   `mapstructure:"insecure"`
-	Username            string `mapstructure:"username"`
-	Password            string `mapstructure:"password"`
-	Datacenter          string `mapstructure:"datacenter"`
-	Folder              string `mapstructure:"folder"`
+	Host                string         `mapstructure:"host"`
+	Insecure            bool           `mapstructure:"insecure"`
+	Username            string         `mapstructure:"username"`
+	Password            string         `mapstructure:"password"`
+	Datacenter          string         `mapstructure:"datacenter"`
+	Folder              string         `mapstructure:"folder"`
+	SnapshotEnable      bool           `mapstructure:"snapshot_enable"`
+	SnapshotName        string         `mapstructure:"snapshot_name"`
+	SnapshotDescription string         `mapstructure:"snapshot_description"`
+	ReregisterVM        config.Trilean `mapstructure:"reregister_vm"`
 
 	ctx interpolate.Context
 }
@@ -40,8 +52,11 @@ type PostProcessor struct {
 	url    *url.URL
 }
 
+func (p *PostProcessor) ConfigSpec() hcldec.ObjectSpec { return p.config.FlatMapstructure().HCL2Spec() }
+
 func (p *PostProcessor) Configure(raws ...interface{}) error {
 	err := config.Decode(&p.config, &config.DecodeOpts{
+		PluginType:         vsphere.BuilderId,
 		Interpolate:        true,
 		InterpolateContext: &p.config.ctx,
 		InterpolateFilter: &interpolate.RenderFilter{
@@ -53,7 +68,7 @@ func (p *PostProcessor) Configure(raws ...interface{}) error {
 		return err
 	}
 
-	errs := new(packer.MultiError)
+	errs := new(packersdk.MultiError)
 	vc := map[string]*string{
 		"host":     &p.config.Host,
 		"username": &p.config.Username,
@@ -62,20 +77,21 @@ func (p *PostProcessor) Configure(raws ...interface{}) error {
 
 	for key, ptr := range vc {
 		if *ptr == "" {
-			errs = packer.MultiErrorAppend(
+			errs = packersdk.MultiErrorAppend(
 				errs, fmt.Errorf("%s must be set", key))
 		}
 	}
 
 	if p.config.Folder != "" && !strings.HasPrefix(p.config.Folder, "/") {
-		errs = packer.MultiErrorAppend(
+		errs = packersdk.MultiErrorAppend(
 			errs, fmt.Errorf("Folder must be bound to the root"))
 	}
 
 	sdk, err := url.Parse(fmt.Sprintf("https://%v/sdk", p.config.Host))
 	if err != nil {
-		errs = packer.MultiErrorAppend(
+		errs = packersdk.MultiErrorAppend(
 			errs, fmt.Errorf("Error invalid vSphere sdk endpoint: %s", err))
+		return errs
 	}
 
 	sdk.User = url.UserPassword(p.config.Username, p.config.Password)
@@ -87,17 +103,20 @@ func (p *PostProcessor) Configure(raws ...interface{}) error {
 	return nil
 }
 
-func (p *PostProcessor) PostProcess(ui packer.Ui, artifact packer.Artifact) (packer.Artifact, bool, error) {
+func (p *PostProcessor) PostProcess(ctx context.Context, ui packersdk.Ui, artifact packersdk.Artifact) (packersdk.Artifact, bool, bool, error) {
 	if _, ok := builtins[artifact.BuilderId()]; !ok {
-		return nil, false, fmt.Errorf("Unknown artifact type, can't build box: %s", artifact.BuilderId())
+		return nil, false, false, fmt.Errorf("The Packer vSphere Template post-processor "+
+			"can only take an artifact from the VMware-iso builder, built on "+
+			"ESXi (i.e. remote) or an artifact from the vSphere post-processor. "+
+			"Artifact type %s does not fit this requirement", artifact.BuilderId())
 	}
 
-	f := artifact.State(iso.ArtifactConfFormat)
-	k := artifact.State(iso.ArtifactConfKeepRegistered)
-	s := artifact.State(iso.ArtifactConfSkipExport)
+	f := artifact.State(vmwcommon.ArtifactConfFormat)
+	k := artifact.State(vmwcommon.ArtifactConfKeepRegistered)
+	s := artifact.State(vmwcommon.ArtifactConfSkipExport)
 
 	if f != "" && k != "true" && s == "false" {
-		return nil, false, errors.New("To use this post-processor with exporting behavior you need set keep_registered as true")
+		return nil, false, false, errors.New("To use this post-processor with exporting behavior you need set keep_registered as true")
 	}
 
 	// In some occasions the VM state is powered on and if we immediately try to mark as template
@@ -106,7 +125,7 @@ func (p *PostProcessor) PostProcess(ui packer.Ui, artifact packer.Artifact) (pac
 	time.Sleep(10 * time.Second)
 	c, err := govmomi.NewClient(context.Background(), p.url, p.config.Insecure)
 	if err != nil {
-		return nil, false, fmt.Errorf("Error connecting to vSphere: %s", err)
+		return nil, false, false, fmt.Errorf("Error connecting to vSphere: %s", err)
 	}
 
 	defer c.Logout(context.Background())
@@ -122,12 +141,13 @@ func (p *PostProcessor) PostProcess(ui packer.Ui, artifact packer.Artifact) (pac
 		&stepCreateFolder{
 			Folder: p.config.Folder,
 		},
-		NewStepMarkAsTemplate(artifact),
+		NewStepCreateSnapshot(artifact, p),
+		NewStepMarkAsTemplate(artifact, p),
 	}
-	runner := common.NewRunnerWithPauseFn(steps, p.config.PackerConfig, ui, state)
-	runner.Run(state)
+	runner := commonsteps.NewRunnerWithPauseFn(steps, p.config.PackerConfig, ui, state)
+	runner.Run(ctx, state)
 	if rawErr, ok := state.GetOk("error"); ok {
-		return nil, false, rawErr.(error)
+		return nil, false, false, rawErr.(error)
 	}
-	return artifact, true, nil
+	return artifact, true, true, nil
 }

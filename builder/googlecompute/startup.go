@@ -7,6 +7,7 @@ import (
 const StartupScriptKey string = "startup-script"
 const StartupScriptStatusKey string = "startup-script-status"
 const StartupWrappedScriptKey string = "packer-wrapped-startup-script"
+const EnableOSLoginKey string = "enable-oslogin"
 
 const StartupScriptStatusDone string = "done"
 const StartupScriptStatusError string = "error"
@@ -15,7 +16,7 @@ const StartupScriptStatusNotDone string = "notdone"
 var StartupScriptLinux string = fmt.Sprintf(`#!/usr/bin/env bash
 echo "Packer startup script starting."
 RETVAL=0
-BASEMETADATAURL=http://metadata/computeMetadata/v1/instance/
+BASEMETADATAURL=http://metadata.google.internal/computeMetadata/v1/instance/
 
 GetMetadata () {
   echo "$(curl -f -H "Metadata-Flavor: Google" ${BASEMETADATAURL}/${1} 2> /dev/null)"

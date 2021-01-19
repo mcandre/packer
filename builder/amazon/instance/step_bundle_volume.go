@@ -5,9 +5,9 @@ import (
 	"fmt"
 
 	"github.com/aws/aws-sdk-go/service/ec2"
-	"github.com/hashicorp/packer/helper/multistep"
-	"github.com/hashicorp/packer/packer"
-	"github.com/hashicorp/packer/template/interpolate"
+	"github.com/hashicorp/packer-plugin-sdk/multistep"
+	packersdk "github.com/hashicorp/packer-plugin-sdk/packer"
+	"github.com/hashicorp/packer-plugin-sdk/template/interpolate"
 )
 
 type bundleCmdData struct {
@@ -24,11 +24,11 @@ type StepBundleVolume struct {
 	Debug bool
 }
 
-func (s *StepBundleVolume) Run(_ context.Context, state multistep.StateBag) multistep.StepAction {
-	comm := state.Get("communicator").(packer.Communicator)
+func (s *StepBundleVolume) Run(ctx context.Context, state multistep.StateBag) multistep.StepAction {
+	comm := state.Get("communicator").(packersdk.Communicator)
 	config := state.Get("config").(*Config)
 	instance := state.Get("instance").(*ec2.Instance)
-	ui := state.Get("ui").(packer.Ui)
+	ui := state.Get("ui").(packersdk.Ui)
 	x509RemoteCertPath := state.Get("x509RemoteCertPath").(string)
 	x509RemoteKeyPath := state.Get("x509RemoteKeyPath").(string)
 
@@ -52,20 +52,20 @@ func (s *StepBundleVolume) Run(_ context.Context, state multistep.StateBag) mult
 	}
 
 	ui.Say("Bundling the volume...")
-	cmd := new(packer.RemoteCmd)
+	cmd := new(packersdk.RemoteCmd)
 	cmd.Command = config.BundleVolCommand
 
 	if s.Debug {
 		ui.Say(fmt.Sprintf("Running: %s", config.BundleVolCommand))
 	}
 
-	if err := cmd.StartWithUi(comm, ui); err != nil {
+	if err := cmd.RunWithUi(ctx, comm, ui); err != nil {
 		state.Put("error", fmt.Errorf("Error bundling volume: %s", err))
 		ui.Error(state.Get("error").(error).Error())
 		return multistep.ActionHalt
 	}
 
-	if cmd.ExitStatus != 0 {
+	if cmd.ExitStatus() != 0 {
 		state.Put("error", fmt.Errorf(
 			"Volume bundling failed. Please see the output above for more\n"+
 				"details on what went wrong.\n\n"+

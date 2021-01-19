@@ -13,11 +13,27 @@ type Workstation10Driver struct {
 	Workstation9Driver
 }
 
-func (d *Workstation10Driver) Clone(dst, src string) error {
+func NewWorkstation10Driver(config *SSHConfig) Driver {
+	return &Workstation10Driver{
+		Workstation9Driver: Workstation9Driver{
+			SSHConfig: config,
+		},
+	}
+}
+
+func (d *Workstation10Driver) Clone(dst, src string, linked bool) error {
+
+	var cloneType string
+	if linked {
+		cloneType = "linked"
+	} else {
+		cloneType = "full"
+	}
+
 	cmd := exec.Command(d.Workstation9Driver.VmrunPath,
 		"-T", "ws",
 		"clone", src, dst,
-		"full")
+		cloneType)
 
 	if _, _, err := runAndLog(cmd); err != nil {
 		return err

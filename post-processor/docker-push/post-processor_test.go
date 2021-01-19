@@ -2,51 +2,42 @@ package dockerpush
 
 import (
 	"bytes"
+	"context"
 	"testing"
 
+	packersdk "github.com/hashicorp/packer-plugin-sdk/packer"
 	"github.com/hashicorp/packer/builder/docker"
-	"github.com/hashicorp/packer/packer"
-	"github.com/hashicorp/packer/post-processor/docker-import"
+	dockerimport "github.com/hashicorp/packer/post-processor/docker-import"
 )
 
-func testConfig() map[string]interface{} {
-	return map[string]interface{}{}
-}
-
-func testPP(t *testing.T) *PostProcessor {
-	var p PostProcessor
-	if err := p.Configure(testConfig()); err != nil {
-		t.Fatalf("err: %s", err)
-	}
-
-	return &p
-}
-
-func testUi() *packer.BasicUi {
-	return &packer.BasicUi{
+func testUi() *packersdk.BasicUi {
+	return &packersdk.BasicUi{
 		Reader: new(bytes.Buffer),
 		Writer: new(bytes.Buffer),
 	}
 }
 
 func TestPostProcessor_ImplementsPostProcessor(t *testing.T) {
-	var _ packer.PostProcessor = new(PostProcessor)
+	var _ packersdk.PostProcessor = new(PostProcessor)
 }
 
 func TestPostProcessor_PostProcess(t *testing.T) {
 	driver := &docker.MockDriver{}
 	p := &PostProcessor{Driver: driver}
-	artifact := &packer.MockArtifact{
+	artifact := &packersdk.MockArtifact{
 		BuilderIdValue: dockerimport.BuilderId,
 		IdValue:        "foo/bar",
 	}
 
-	result, keep, err := p.PostProcess(testUi(), artifact)
-	if result != nil {
-		t.Fatal("should be nil")
+	result, keep, forceOverride, err := p.PostProcess(context.Background(), testUi(), artifact)
+	if _, ok := result.(packersdk.Artifact); !ok {
+		t.Fatal("should be instance of Artifact")
 	}
-	if keep {
-		t.Fatal("should not keep")
+	if !keep {
+		t.Fatal("should keep")
+	}
+	if forceOverride {
+		t.Fatal("Should default to keep, but not override user wishes")
 	}
 	if err != nil {
 		t.Fatalf("err: %s", err)
@@ -58,22 +49,28 @@ func TestPostProcessor_PostProcess(t *testing.T) {
 	if driver.PushName != "foo/bar" {
 		t.Fatal("bad name")
 	}
+	if result.Id() != "foo/bar" {
+		t.Fatal("bad image id")
+	}
 }
 
 func TestPostProcessor_PostProcess_portInName(t *testing.T) {
 	driver := &docker.MockDriver{}
 	p := &PostProcessor{Driver: driver}
-	artifact := &packer.MockArtifact{
+	artifact := &packersdk.MockArtifact{
 		BuilderIdValue: dockerimport.BuilderId,
 		IdValue:        "localhost:5000/foo/bar",
 	}
 
-	result, keep, err := p.PostProcess(testUi(), artifact)
-	if result != nil {
-		t.Fatal("should be nil")
+	result, keep, forceOverride, err := p.PostProcess(context.Background(), testUi(), artifact)
+	if _, ok := result.(packersdk.Artifact); !ok {
+		t.Fatal("should be instance of Artifact")
 	}
-	if keep {
-		t.Fatal("should not keep")
+	if !keep {
+		t.Fatal("should keep")
+	}
+	if forceOverride {
+		t.Fatal("Should default to keep, but not override user wishes")
 	}
 	if err != nil {
 		t.Fatalf("err: %s", err)
@@ -85,22 +82,28 @@ func TestPostProcessor_PostProcess_portInName(t *testing.T) {
 	if driver.PushName != "localhost:5000/foo/bar" {
 		t.Fatal("bad name")
 	}
+	if result.Id() != "localhost:5000/foo/bar" {
+		t.Fatal("bad image id")
+	}
 }
 
 func TestPostProcessor_PostProcess_tags(t *testing.T) {
 	driver := &docker.MockDriver{}
 	p := &PostProcessor{Driver: driver}
-	artifact := &packer.MockArtifact{
+	artifact := &packersdk.MockArtifact{
 		BuilderIdValue: dockerimport.BuilderId,
 		IdValue:        "hashicorp/ubuntu:precise",
 	}
 
-	result, keep, err := p.PostProcess(testUi(), artifact)
-	if result != nil {
-		t.Fatal("should be nil")
+	result, keep, forceOverride, err := p.PostProcess(context.Background(), testUi(), artifact)
+	if _, ok := result.(packersdk.Artifact); !ok {
+		t.Fatal("should be instance of Artifact")
 	}
-	if keep {
-		t.Fatal("should not keep")
+	if !keep {
+		t.Fatal("should keep")
+	}
+	if forceOverride {
+		t.Fatal("Should default to keep, but not override user wishes")
 	}
 	if err != nil {
 		t.Fatalf("err: %s", err)
@@ -111,5 +114,8 @@ func TestPostProcessor_PostProcess_tags(t *testing.T) {
 	}
 	if driver.PushName != "hashicorp/ubuntu:precise" {
 		t.Fatalf("bad name: %s", driver.PushName)
+	}
+	if result.Id() != "hashicorp/ubuntu:precise" {
+		t.Fatal("bad image id")
 	}
 }

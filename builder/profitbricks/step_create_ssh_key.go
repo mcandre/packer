@@ -5,10 +5,9 @@ import (
 	"crypto/x509"
 	"encoding/pem"
 	"fmt"
-	"io/ioutil"
 
-	"github.com/hashicorp/packer/helper/multistep"
-	"github.com/hashicorp/packer/packer"
+	"github.com/hashicorp/packer-plugin-sdk/multistep"
+	packersdk "github.com/hashicorp/packer-plugin-sdk/packer"
 	"golang.org/x/crypto/ssh"
 )
 
@@ -17,14 +16,14 @@ type StepCreateSSHKey struct {
 	DebugKeyPath string
 }
 
-func (s *StepCreateSSHKey) Run(_ context.Context, state multistep.StateBag) multistep.StepAction {
-	ui := state.Get("ui").(packer.Ui)
+func (s *StepCreateSSHKey) Run(ctx context.Context, state multistep.StateBag) multistep.StepAction {
+	ui := state.Get("ui").(packersdk.Ui)
 	c := state.Get("config").(*Config)
 
-	if c.Comm.SSHPrivateKey != "" {
-		pemBytes, err := ioutil.ReadFile(c.Comm.SSHPrivateKey)
-
+	if c.Comm.SSHPrivateKeyFile != "" {
+		pemBytes, err := c.Comm.ReadSSHPrivateKeyFile()
 		if err != nil {
+			state.Put("error", err)
 			ui.Error(err.Error())
 			return multistep.ActionHalt
 		}
@@ -53,8 +52,8 @@ func (s *StepCreateSSHKey) Run(_ context.Context, state multistep.StateBag) mult
 			ui.Error(err.Error())
 			return multistep.ActionHalt
 		}
-		state.Put("privateKey", string(pem.EncodeToMemory(&priv_blk)))
-		state.Put("publicKey", string(ssh.MarshalAuthorizedKey(pub)))
+		c.Comm.SSHPrivateKey = pem.EncodeToMemory(&priv_blk)
+		c.Comm.SSHPublicKey = ssh.MarshalAuthorizedKey(pub)
 	}
 	return multistep.ActionContinue
 }

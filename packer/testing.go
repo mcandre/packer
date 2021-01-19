@@ -4,17 +4,15 @@ import (
 	"bytes"
 	"io/ioutil"
 	"testing"
+
+	packersdk "github.com/hashicorp/packer-plugin-sdk/packer"
 )
 
 func TestCoreConfig(t *testing.T) *CoreConfig {
 	// Create some test components
 	components := ComponentFinder{
-		Builder: func(n string) (Builder, error) {
-			if n != "test" {
-				return nil, nil
-			}
-
-			return &MockBuilder{}, nil
+		BuilderStore: MapOfBuilder{
+			"test": func() (packersdk.Builder, error) { return &packersdk.MockBuilder{}, nil },
 		},
 	}
 
@@ -24,7 +22,8 @@ func TestCoreConfig(t *testing.T) *CoreConfig {
 }
 
 func TestCore(t *testing.T, c *CoreConfig) *Core {
-	core, err := NewCore(c)
+	core := NewCore(c)
+	err := core.Initialize()
 	if err != nil {
 		t.Fatalf("err: %s", err)
 	}
@@ -32,9 +31,9 @@ func TestCore(t *testing.T, c *CoreConfig) *Core {
 	return core
 }
 
-func TestUi(t *testing.T) Ui {
+func TestUi(t *testing.T) packersdk.Ui {
 	var buf bytes.Buffer
-	return &BasicUi{
+	return &packersdk.BasicUi{
 		Reader:      &buf,
 		Writer:      ioutil.Discard,
 		ErrorWriter: ioutil.Discard,
@@ -43,15 +42,11 @@ func TestUi(t *testing.T) Ui {
 
 // TestBuilder sets the builder with the name n to the component finder
 // and returns the mock.
-func TestBuilder(t *testing.T, c *CoreConfig, n string) *MockBuilder {
-	var b MockBuilder
+func TestBuilder(t *testing.T, c *CoreConfig, n string) *packersdk.MockBuilder {
+	var b packersdk.MockBuilder
 
-	c.Components.Builder = func(actual string) (Builder, error) {
-		if actual != n {
-			return nil, nil
-		}
-
-		return &b, nil
+	c.Components.BuilderStore = MapOfBuilder{
+		n: func() (packersdk.Builder, error) { return &b, nil },
 	}
 
 	return &b
@@ -59,15 +54,11 @@ func TestBuilder(t *testing.T, c *CoreConfig, n string) *MockBuilder {
 
 // TestProvisioner sets the prov. with the name n to the component finder
 // and returns the mock.
-func TestProvisioner(t *testing.T, c *CoreConfig, n string) *MockProvisioner {
-	var b MockProvisioner
+func TestProvisioner(t *testing.T, c *CoreConfig, n string) *packersdk.MockProvisioner {
+	var b packersdk.MockProvisioner
 
-	c.Components.Provisioner = func(actual string) (Provisioner, error) {
-		if actual != n {
-			return nil, nil
-		}
-
-		return &b, nil
+	c.Components.ProvisionerStore = MapOfProvisioner{
+		n: func() (packersdk.Provisioner, error) { return &b, nil },
 	}
 
 	return &b
@@ -78,12 +69,8 @@ func TestProvisioner(t *testing.T, c *CoreConfig, n string) *MockProvisioner {
 func TestPostProcessor(t *testing.T, c *CoreConfig, n string) *MockPostProcessor {
 	var b MockPostProcessor
 
-	c.Components.PostProcessor = func(actual string) (PostProcessor, error) {
-		if actual != n {
-			return nil, nil
-		}
-
-		return &b, nil
+	c.Components.PostProcessorStore = MapOfPostProcessor{
+		n: func() (packersdk.PostProcessor, error) { return &b, nil },
 	}
 
 	return &b

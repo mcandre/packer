@@ -11,7 +11,7 @@ import (
 	"path/filepath"
 	"regexp"
 
-	"github.com/hashicorp/packer/packer"
+	packersdk "github.com/hashicorp/packer-plugin-sdk/packer"
 )
 
 type VBoxProvider struct{}
@@ -20,7 +20,7 @@ func (p *VBoxProvider) KeepInputArtifact() bool {
 	return false
 }
 
-func (p *VBoxProvider) Process(ui packer.Ui, artifact packer.Artifact, dir string) (vagrantfile string, metadata map[string]interface{}, err error) {
+func (p *VBoxProvider) Process(ui packersdk.Ui, artifact packersdk.Artifact, dir string) (vagrantfile string, metadata map[string]interface{}, err error) {
 	// Create the metadata
 	metadata = map[string]interface{}{"provider": "virtualbox"}
 
@@ -133,7 +133,15 @@ func DecompressOva(dir, src string) error {
 		if hdr == nil || err == io.EOF {
 			break
 		}
+		if err != nil {
+			return err
+		}
 
+		// We use the fileinfo to get the file name because we are not
+		// expecting path information as from the tar header. It's important
+		// that we not use the path name from the tar header without checking
+		// for the presence of `..`. If we accidentally allow for that, we can
+		// open ourselves up to a path traversal vulnerability.
 		info := hdr.FileInfo()
 
 		// Shouldn't be any directories, skip them

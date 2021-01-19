@@ -3,9 +3,9 @@ package arm
 import (
 	"context"
 
+	"github.com/hashicorp/packer-plugin-sdk/multistep"
+	packersdk "github.com/hashicorp/packer-plugin-sdk/packer"
 	"github.com/hashicorp/packer/builder/azure/common/constants"
-	"github.com/hashicorp/packer/helper/multistep"
-	"github.com/hashicorp/packer/packer"
 )
 
 type StepSetCertificate struct {
@@ -14,7 +14,7 @@ type StepSetCertificate struct {
 	error  func(e error)
 }
 
-func NewStepSetCertificate(config *Config, ui packer.Ui) *StepSetCertificate {
+func NewStepSetCertificate(config *Config, ui packersdk.Ui) *StepSetCertificate {
 	var step = &StepSetCertificate{
 		config: config,
 		say:    func(message string) { ui.Say(message) },
@@ -24,7 +24,7 @@ func NewStepSetCertificate(config *Config, ui packer.Ui) *StepSetCertificate {
 	return step
 }
 
-func (s *StepSetCertificate) Run(_ context.Context, state multistep.StateBag) multistep.StepAction {
+func (s *StepSetCertificate) Run(ctx context.Context, state multistep.StateBag) multistep.StepAction {
 	s.say("Setting the certificate's URL ...")
 
 	var winRMCertificateUrl = state.Get(constants.ArmCertificateUrl).(string)

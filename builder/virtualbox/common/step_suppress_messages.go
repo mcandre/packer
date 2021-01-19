@@ -5,17 +5,17 @@ import (
 	"fmt"
 	"log"
 
-	"github.com/hashicorp/packer/helper/multistep"
-	"github.com/hashicorp/packer/packer"
+	"github.com/hashicorp/packer-plugin-sdk/multistep"
+	packersdk "github.com/hashicorp/packer-plugin-sdk/packer"
 )
 
 // This step sets some variables in VirtualBox so that annoying
 // pop-up messages don't exist.
 type StepSuppressMessages struct{}
 
-func (StepSuppressMessages) Run(_ context.Context, state multistep.StateBag) multistep.StepAction {
+func (StepSuppressMessages) Run(ctx context.Context, state multistep.StateBag) multistep.StepAction {
 	driver := state.Get("driver").(Driver)
-	ui := state.Get("ui").(packer.Ui)
+	ui := state.Get("ui").(packersdk.Ui)
 
 	log.Println("Suppressing annoying messages in VirtualBox")
 	if err := driver.SuppressMessages(); err != nil {

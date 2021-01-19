@@ -8,22 +8,23 @@ import (
 	"time"
 
 	"github.com/gophercloud/gophercloud/openstack/compute/v2/servers"
-	"github.com/hashicorp/packer/helper/communicator"
-	"github.com/hashicorp/packer/helper/multistep"
-	"github.com/hashicorp/packer/packer"
+	"github.com/hashicorp/packer-plugin-sdk/communicator"
+	"github.com/hashicorp/packer-plugin-sdk/multistep"
+	packersdk "github.com/hashicorp/packer-plugin-sdk/packer"
 	"golang.org/x/crypto/ssh"
 )
 
 // StepGetPassword reads the password from a booted OpenStack server and sets
 // it on the WinRM config.
 type StepGetPassword struct {
-	Debug bool
-	Comm  *communicator.Config
+	Debug     bool
+	Comm      *communicator.Config
+	BuildName string
 }
 
-func (s *StepGetPassword) Run(_ context.Context, state multistep.StateBag) multistep.StepAction {
-	config := state.Get("config").(Config)
-	ui := state.Get("ui").(packer.Ui)
+func (s *StepGetPassword) Run(ctx context.Context, state multistep.StateBag) multistep.StepAction {
+	config := state.Get("config").(*Config)
+	ui := state.Get("ui").(packersdk.Ui)
 
 	// Skip if we're not using winrm
 	if s.Comm.Type != "winrm" {
@@ -49,7 +50,7 @@ func (s *StepGetPassword) Run(_ context.Context, state multistep.StateBag) multi
 	server := state.Get("server").(*servers.Server)
 	var password string
 
-	privateKey, err := ssh.ParseRawPrivateKey([]byte(state.Get("privateKey").(string)))
+	privateKey, err := ssh.ParseRawPrivateKey(s.Comm.SSHPrivateKey)
 	if err != nil {
 		err = fmt.Errorf("Error parsing private key: %s", err)
 		state.Put("error", err)
@@ -75,6 +76,8 @@ func (s *StepGetPassword) Run(_ context.Context, state multistep.StateBag) multi
 		ui.Message(fmt.Sprintf(
 			"Password (since debug is enabled) \"%s\"", s.Comm.WinRMPassword))
 	}
+
+	packersdk.LogSecretFilter.Set(s.Comm.WinRMPassword)
 
 	return multistep.ActionContinue
 }

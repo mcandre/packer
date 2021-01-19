@@ -5,10 +5,12 @@ import (
 	"errors"
 	"fmt"
 	"io/ioutil"
+	"log"
+	"strings"
 	"time"
 
-	"github.com/hashicorp/packer/helper/multistep"
-	"github.com/hashicorp/packer/packer"
+	"github.com/hashicorp/packer-plugin-sdk/multistep"
+	packersdk "github.com/hashicorp/packer-plugin-sdk/packer"
 )
 
 // StepCreateInstance represents a Packer build step that creates GCE instances.
@@ -16,46 +18,81 @@ type StepCreateInstance struct {
 	Debug bool
 }
 
-func (c *Config) createInstanceMetadata(sourceImage *Image, sshPublicKey string) (map[string]string, error) {
-	instanceMetadata := make(map[string]string)
+func (c *Config) createInstanceMetadata(sourceImage *Image, sshPublicKey string) (map[string]string, map[string]string, error) {
+
+	instanceMetadataNoSSHKeys := make(map[string]string)
+	instanceMetadataSSHKeys := make(map[string]string)
+
+	sshMetaKey := "ssh-keys"
+
 	var err error
+	var errs *packersdk.MultiError
 
 	// Copy metadata from config.
 	for k, v := range c.Metadata {
-		instanceMetadata[k] = v
+		if k == sshMetaKey {
+			instanceMetadataSSHKeys[k] = v
+		} else {
+			instanceMetadataNoSSHKeys[k] = v
+		}
 	}
 
 	// Merge any existing ssh keys with our public key, unless there is no
 	// supplied public key. This is possible if a private_key_file was
 	// specified.
 	if sshPublicKey != "" {
-		sshMetaKey := "sshKeys"
-		sshKeys := fmt.Sprintf("%s:%s", c.Comm.SSHUsername, sshPublicKey)
-		if confSshKeys, exists := instanceMetadata[sshMetaKey]; exists {
-			sshKeys = fmt.Sprintf("%s\n%s", sshKeys, confSshKeys)
+		sshMetaKey := "ssh-keys"
+		sshPublicKey = strings.TrimSuffix(sshPublicKey, "\n")
+		sshKeys := fmt.Sprintf("%s:%s %s", c.Comm.SSHUsername, sshPublicKey, c.Comm.SSHUsername)
+		if confSSHKeys, exists := instanceMetadataSSHKeys[sshMetaKey]; exists {
+			sshKeys = fmt.Sprintf("%s\n%s", sshKeys, confSSHKeys)
 		}
-		instanceMetadata[sshMetaKey] = sshKeys
+		instanceMetadataSSHKeys[sshMetaKey] = sshKeys
 	}
 
-	// Wrap any startup script with our own startup script.
+	startupScript := instanceMetadataNoSSHKeys[StartupScriptKey]
 	if c.StartupScriptFile != "" {
 		var content []byte
 		content, err = ioutil.ReadFile(c.StartupScriptFile)
-		instanceMetadata[StartupWrappedScriptKey] = string(content)
-	} else if wrappedStartupScript, exists := instanceMetadata[StartupScriptKey]; exists {
-		instanceMetadata[StartupWrappedScriptKey] = wrappedStartupScript
+		if err != nil {
+			return nil, instanceMetadataNoSSHKeys, err
+		}
+		startupScript = string(content)
 	}
-	if sourceImage.IsWindows() {
-		// Windows startup script support is not yet implemented.
-		// Mark the startup script as done.
-		instanceMetadata[StartupScriptKey] = StartupScriptWindows
-		instanceMetadata[StartupScriptStatusKey] = StartupScriptStatusDone
-	} else {
-		instanceMetadata[StartupScriptKey] = StartupScriptLinux
-		instanceMetadata[StartupScriptStatusKey] = StartupScriptStatusNotDone
+	instanceMetadataNoSSHKeys[StartupScriptKey] = startupScript
+
+	// Wrap any found startup script with our own startup script wrapper.
+	if startupScript != "" && c.WrapStartupScriptFile.True() {
+		instanceMetadataNoSSHKeys[StartupScriptKey] = StartupScriptLinux
+		instanceMetadataNoSSHKeys[StartupWrappedScriptKey] = startupScript
+		instanceMetadataNoSSHKeys[StartupScriptStatusKey] = StartupScriptStatusNotDone
 	}
 
-	return instanceMetadata, err
+	if sourceImage.IsWindows() {
+		// Windows startup script support is not yet implemented so clear any script data and set status to done
+		instanceMetadataNoSSHKeys[StartupScriptKey] = StartupScriptWindows
+		instanceMetadataNoSSHKeys[StartupScriptStatusKey] = StartupScriptStatusDone
+	}
+
+	// If UseOSLogin is true, force `enable-oslogin` in metadata
+	// In the event that `enable-oslogin` is not enabled at project level
+	if c.UseOSLogin {
+		instanceMetadataNoSSHKeys[EnableOSLoginKey] = "TRUE"
+	}
+
+	for key, value := range c.MetadataFiles {
+		var content []byte
+		content, err = ioutil.ReadFile(value)
+		if err != nil {
+			errs = packersdk.MultiErrorAppend(errs, err)
+		}
+		instanceMetadataNoSSHKeys[key] = string(content)
+	}
+
+	if errs != nil && len(errs.Errors) > 0 {
+		return instanceMetadataNoSSHKeys, instanceMetadataSSHKeys, errs
+	}
+	return instanceMetadataNoSSHKeys, instanceMetadataSSHKeys, nil
 }
 
 func getImage(c *Config, d Driver) (*Image, error) {
@@ -65,23 +102,30 @@ func getImage(c *Config, d Driver) (*Image, error) {
 		name = c.SourceImage
 		fromFamily = false
 	}
-	if c.SourceImageProjectId == "" {
+	if len(c.SourceImageProjectId) == 0 {
 		return d.GetImage(name, fromFamily)
 	} else {
-		return d.GetImageFromProject(c.SourceImageProjectId, name, fromFamily)
+		return d.GetImageFromProjects(c.SourceImageProjectId, name, fromFamily)
 	}
 }
 
 // Run executes the Packer build step that creates a GCE instance.
-func (s *StepCreateInstance) Run(_ context.Context, state multistep.StateBag) multistep.StepAction {
+func (s *StepCreateInstance) Run(ctx context.Context, state multistep.StateBag) multistep.StepAction {
 	c := state.Get("config").(*Config)
 	d := state.Get("driver").(Driver)
-	sshPublicKey := state.Get("ssh_public_key").(string)
-	ui := state.Get("ui").(packer.Ui)
+
+	ui := state.Get("ui").(packersdk.Ui)
 
 	sourceImage, err := getImage(c, d)
 	if err != nil {
 		err := fmt.Errorf("Error getting source image for instance creation: %s", err)
+		state.Put("error", err)
+		ui.Error(err.Error())
+		return multistep.ActionHalt
+	}
+
+	if c.EnableSecureBoot && !sourceImage.IsSecureBootCompatible() {
+		err := fmt.Errorf("Image: %s is not secure boot compatible. Please set 'enable_secure_boot' to false or choose another source image.", sourceImage.Name)
 		state.Put("error", err)
 		ui.Error(err.Error())
 		return multistep.ActionHalt
@@ -97,37 +141,63 @@ func (s *StepCreateInstance) Run(_ context.Context, state multistep.StateBag) mu
 	name := c.InstanceName
 
 	var errCh <-chan error
-	var metadata map[string]string
-	metadata, err = c.createInstanceMetadata(sourceImage, sshPublicKey)
+	var metadataNoSSHKeys map[string]string
+	var metadataSSHKeys map[string]string
+	metadataForInstance := make(map[string]string)
+
+	metadataNoSSHKeys, metadataSSHKeys, errs := c.createInstanceMetadata(sourceImage, string(c.Comm.SSHPublicKey))
+	if errs != nil {
+		state.Put("error", errs.Error())
+		ui.Error(errs.Error())
+		return multistep.ActionHalt
+	}
+
+	if c.WaitToAddSSHKeys > 0 {
+		log.Printf("[DEBUG] Adding metadata during instance creation, but not SSH keys...")
+		metadataForInstance = metadataNoSSHKeys
+	} else {
+		log.Printf("[DEBUG] Adding metadata during instance creation...")
+
+		// Union of both non-SSH key meta data and SSH key meta data
+		addmap(metadataForInstance, metadataSSHKeys)
+		addmap(metadataForInstance, metadataNoSSHKeys)
+	}
+
 	errCh, err = d.RunInstance(&InstanceConfig{
-		AcceleratorType:   c.AcceleratorType,
-		AcceleratorCount:  c.AcceleratorCount,
-		Address:           c.Address,
-		Description:       "New instance created by Packer",
-		DiskSizeGb:        c.DiskSizeGb,
-		DiskType:          c.DiskType,
-		Image:             sourceImage,
-		Labels:            c.Labels,
-		MachineType:       c.MachineType,
-		Metadata:          metadata,
-		Name:              name,
-		Network:           c.Network,
-		NetworkProjectId:  c.NetworkProjectId,
-		OmitExternalIP:    c.OmitExternalIP,
-		OnHostMaintenance: c.OnHostMaintenance,
-		Preemptible:       c.Preemptible,
-		Region:            c.Region,
-		Scopes:            c.Scopes,
-		Subnetwork:        c.Subnetwork,
-		Tags:              c.Tags,
-		Zone:              c.Zone,
+		AcceleratorType:              c.AcceleratorType,
+		AcceleratorCount:             c.AcceleratorCount,
+		Address:                      c.Address,
+		Description:                  "New instance created by Packer",
+		DisableDefaultServiceAccount: c.DisableDefaultServiceAccount,
+		DiskSizeGb:                   c.DiskSizeGb,
+		DiskType:                     c.DiskType,
+		EnableSecureBoot:             c.EnableSecureBoot,
+		EnableVtpm:                   c.EnableVtpm,
+		EnableIntegrityMonitoring:    c.EnableIntegrityMonitoring,
+		Image:                        sourceImage,
+		Labels:                       c.Labels,
+		MachineType:                  c.MachineType,
+		Metadata:                     metadataForInstance,
+		MinCpuPlatform:               c.MinCpuPlatform,
+		Name:                         name,
+		Network:                      c.Network,
+		NetworkProjectId:             c.NetworkProjectId,
+		OmitExternalIP:               c.OmitExternalIP,
+		OnHostMaintenance:            c.OnHostMaintenance,
+		Preemptible:                  c.Preemptible,
+		Region:                       c.Region,
+		ServiceAccountEmail:          c.ServiceAccountEmail,
+		Scopes:                       c.Scopes,
+		Subnetwork:                   c.Subnetwork,
+		Tags:                         c.Tags,
+		Zone:                         c.Zone,
 	})
 
 	if err == nil {
 		ui.Message("Waiting for creation operation to complete...")
 		select {
 		case err = <-errCh:
-		case <-time.After(c.stateTimeout):
+		case <-time.After(c.StateTimeout):
 			err = errors.New("time out while waiting for instance to create")
 		}
 	}
@@ -149,8 +219,42 @@ func (s *StepCreateInstance) Run(_ context.Context, state multistep.StateBag) mu
 
 	// Things succeeded, store the name so we can remove it later
 	state.Put("instance_name", name)
+	// instance_id is the generic term used so that users can have access to the
+	// instance id inside of the provisioners, used in step_provision.
+	state.Put("instance_id", name)
+
+	if c.WaitToAddSSHKeys > 0 {
+		ui.Message(fmt.Sprintf("Waiting %s before adding SSH keys...",
+			c.WaitToAddSSHKeys.String()))
+		cancelled := s.waitForBoot(ctx, c.WaitToAddSSHKeys)
+		if cancelled {
+			return multistep.ActionHalt
+		}
+
+		log.Printf("[DEBUG] %s wait is over. Adding SSH keys to existing instance...",
+			c.WaitToAddSSHKeys.String())
+		err = d.AddToInstanceMetadata(c.Zone, name, metadataSSHKeys)
+
+		if err != nil {
+			err := fmt.Errorf("Error adding SSH keys to existing instance: %s", err)
+			state.Put("error", err)
+			ui.Error(err.Error())
+			return multistep.ActionHalt
+		}
+	}
 
 	return multistep.ActionContinue
+}
+
+func (s *StepCreateInstance) waitForBoot(ctx context.Context, waitLen time.Duration) bool {
+	// Use a select to determine if we get cancelled during the wait
+	select {
+	case <-ctx.Done():
+		return true
+	case <-time.After(waitLen):
+	}
+
+	return false
 }
 
 // Cleanup destroys the GCE instance created during the image creation process.
@@ -166,14 +270,14 @@ func (s *StepCreateInstance) Cleanup(state multistep.StateBag) {
 
 	config := state.Get("config").(*Config)
 	driver := state.Get("driver").(Driver)
-	ui := state.Get("ui").(packer.Ui)
+	ui := state.Get("ui").(packersdk.Ui)
 
 	ui.Say("Deleting instance...")
 	errCh, err := driver.DeleteInstance(config.Zone, name)
 	if err == nil {
 		select {
 		case err = <-errCh:
-		case <-time.After(config.stateTimeout):
+		case <-time.After(config.StateTimeout):
 			err = errors.New("time out while waiting for instance to delete")
 		}
 	}
@@ -195,7 +299,7 @@ func (s *StepCreateInstance) Cleanup(state multistep.StateBag) {
 	if err == nil {
 		select {
 		case err = <-errCh:
-		case <-time.After(config.stateTimeout):
+		case <-time.After(config.StateTimeout):
 			err = errors.New("time out while waiting for disk to delete")
 		}
 	}
@@ -210,4 +314,11 @@ func (s *StepCreateInstance) Cleanup(state multistep.StateBag) {
 	ui.Message("Disk has been deleted!")
 
 	return
+}
+
+func addmap(a map[string]string, b map[string]string) {
+
+	for k, v := range b {
+		a[k] = v
+	}
 }

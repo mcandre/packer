@@ -2,15 +2,16 @@ package checksum
 
 import (
 	"bytes"
+	"context"
 	"fmt"
 	"io/ioutil"
 	"os"
 	"strings"
 	"testing"
 
+	packersdk "github.com/hashicorp/packer-plugin-sdk/packer"
+	"github.com/hashicorp/packer-plugin-sdk/template"
 	"github.com/hashicorp/packer/builder/file"
-	"github.com/hashicorp/packer/packer"
-	"github.com/hashicorp/packer/template"
 )
 
 const expectedFileContents = "Hello world!"
@@ -35,7 +36,7 @@ func TestChecksumSHA1(t *testing.T) {
 		t.Errorf("Unable to read checksum file: %s", err)
 	}
 	if buf, _ := ioutil.ReadAll(f); !bytes.Equal(buf, []byte("d3486ae9136e7856bc42212385ea797094475802\tpackage.txt\n")) {
-		t.Errorf("Failed to compate checksum: %s\n%s", buf, "d3486ae9136e7856bc42212385ea797094475802 package.txt")
+		t.Errorf("Failed to compute checksum: %s\n%s", buf, "d3486ae9136e7856bc42212385ea797094475802 package.txt")
 	}
 
 	defer f.Close()
@@ -43,10 +44,9 @@ func TestChecksumSHA1(t *testing.T) {
 
 // Test Helpers
 
-func setup(t *testing.T) (packer.Ui, packer.Artifact, error) {
+func setup(t *testing.T) (packersdk.Ui, packersdk.Artifact, error) {
 	// Create fake UI and Cache
-	ui := packer.TestUi(t)
-	cache := &packer.FileCache{CacheDir: os.TempDir()}
+	ui := packersdk.TestUi(t)
 
 	// Create config for file builder
 	const fileConfig = `{"builders":[{"type":"file","target":"package.txt","content":"Hello world!"}]}`
@@ -57,7 +57,7 @@ func setup(t *testing.T) (packer.Ui, packer.Artifact, error) {
 
 	// Prepare the file builder
 	builder := file.Builder{}
-	warnings, err := builder.Prepare(tpl.Builders["file"].Config)
+	_, warnings, err := builder.Prepare(tpl.Builders["file"].Config)
 	if len(warnings) > 0 {
 		for _, warn := range warnings {
 			return nil, nil, fmt.Errorf("Configuration warning: %s", warn)
@@ -68,7 +68,7 @@ func setup(t *testing.T) (packer.Ui, packer.Artifact, error) {
 	}
 
 	// Run the file builder
-	artifact, err := builder.Run(ui, nil, cache)
+	artifact, err := builder.Run(context.Background(), ui, nil)
 	if err != nil {
 		return nil, nil, fmt.Errorf("Failed to build artifact: %s", err)
 	}
@@ -76,7 +76,7 @@ func setup(t *testing.T) (packer.Ui, packer.Artifact, error) {
 	return ui, artifact, err
 }
 
-func testChecksum(t *testing.T, config string) packer.Artifact {
+func testChecksum(t *testing.T, config string) packersdk.Artifact {
 	ui, artifact, err := setup(t)
 	if err != nil {
 		t.Fatalf("Error bootstrapping test: %s", err)
@@ -99,7 +99,7 @@ func testChecksum(t *testing.T, config string) packer.Artifact {
 	checksum.config.PackerBuildName = "vanilla"
 	checksum.config.PackerBuilderType = "file"
 
-	artifactOut, _, err := checksum.PostProcess(ui, artifact)
+	artifactOut, _, _, err := checksum.PostProcess(context.Background(), ui, artifact)
 	if err != nil {
 		t.Fatalf("Failed to checksum artifact: %s", err)
 	}

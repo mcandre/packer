@@ -1,6 +1,7 @@
 package googlecompute
 
 import (
+	"context"
 	"crypto/rand"
 	"crypto/rsa"
 	"crypto/sha1"
@@ -9,58 +10,103 @@ import (
 	"errors"
 	"fmt"
 	"log"
-	"net/http"
-	"runtime"
 	"strings"
 	"time"
 
-	"google.golang.org/api/compute/v1"
+	compute "google.golang.org/api/compute/v1"
+	"google.golang.org/api/option"
+	oslogin "google.golang.org/api/oslogin/v1"
 
-	"github.com/hashicorp/packer/common"
-	"github.com/hashicorp/packer/packer"
-	"github.com/hashicorp/packer/version"
+	packersdk "github.com/hashicorp/packer-plugin-sdk/packer"
+	"github.com/hashicorp/packer-plugin-sdk/retry"
+	"github.com/hashicorp/packer-plugin-sdk/useragent"
+	"github.com/hashicorp/packer/builder/googlecompute/version"
+	vaultapi "github.com/hashicorp/vault/api"
 
 	"golang.org/x/oauth2"
 	"golang.org/x/oauth2/google"
-	"golang.org/x/oauth2/jwt"
 )
 
 // driverGCE is a Driver implementation that actually talks to GCE.
 // Create an instance using NewDriverGCE.
 type driverGCE struct {
-	projectId string
-	service   *compute.Service
-	ui        packer.Ui
+	projectId      string
+	service        *compute.Service
+	osLoginService *oslogin.Service
+	ui             packersdk.Ui
+}
+
+type GCEDriverConfig struct {
+	Ui                            packersdk.Ui
+	ProjectId                     string
+	Account                       *ServiceAccount
+	ImpersonateServiceAccountName string
+	VaultOauthEngineName          string
 }
 
 var DriverScopes = []string{"https://www.googleapis.com/auth/compute", "https://www.googleapis.com/auth/devstorage.full_control"}
 
-func NewDriverGCE(ui packer.Ui, p string, a *AccountFile) (Driver, error) {
+// Define a TokenSource that gets tokens from Vault
+type OauthTokenSource struct {
+	Path string
+}
+
+func (ots OauthTokenSource) Token() (*oauth2.Token, error) {
+	log.Printf("Retrieving Oauth token from Vault...")
+	vaultConfig := vaultapi.DefaultConfig()
+	cli, err := vaultapi.NewClient(vaultConfig)
+	if err != nil {
+		return nil, fmt.Errorf("%s\n", err)
+	}
+	resp, err := cli.Logical().Read(ots.Path)
+	if err != nil {
+		return nil, fmt.Errorf("Error reading vault resp: %s", err)
+	}
+	if resp == nil {
+		return nil, fmt.Errorf("Vault Oauth Engine does not exist at the given path.")
+	}
+	token, ok := resp.Data["token"]
+	if !ok {
+		return nil, fmt.Errorf("ERROR, token was not present in response body")
+	}
+	at := token.(string)
+
+	log.Printf("Retrieved Oauth token from Vault")
+	return &oauth2.Token{
+		AccessToken: at,
+		Expiry:      time.Now().Add(time.Minute * time.Duration(60)),
+	}, nil
+
+}
+
+func NewClientOptionGoogle(account *ServiceAccount, vaultOauth string, impersonatesa string) (option.ClientOption, error) {
 	var err error
 
-	var client *http.Client
+	var opts option.ClientOption
 
-	// Auth with AccountFile first if provided
-	if a.PrivateKey != "" {
-		log.Printf("[INFO] Requesting Google token via AccountFile...")
-		log.Printf("[INFO]   -- Email: %s", a.ClientEmail)
+	if vaultOauth != "" {
+		// Auth with Vault Oauth
+		log.Printf("Using Vault to generate Oauth token.")
+		ts := OauthTokenSource{vaultOauth}
+		opts = option.WithTokenSource(ts)
+
+	} else if impersonatesa != "" {
+		opts = option.ImpersonateCredentials(impersonatesa)
+	} else if account != nil && account.jwt != nil && len(account.jwt.PrivateKey) > 0 {
+		// Auth with AccountFile if provided
+		log.Printf("[INFO] Requesting Google token via account_file...")
+		log.Printf("[INFO]   -- Email: %s", account.jwt.Email)
 		log.Printf("[INFO]   -- Scopes: %s", DriverScopes)
-		log.Printf("[INFO]   -- Private Key Length: %d", len(a.PrivateKey))
+		log.Printf("[INFO]   -- Private Key Length: %d", len(account.jwt.PrivateKey))
 
-		conf := jwt.Config{
-			Email:      a.ClientEmail,
-			PrivateKey: []byte(a.PrivateKey),
-			Scopes:     DriverScopes,
-			TokenURL:   "https://accounts.google.com/o/oauth2/token",
-		}
-
-		// Initiate an http.Client. The following GET request will be
-		// authorized and authenticated on the behalf of
-		// your service account.
-		client = conf.Client(oauth2.NoContext)
+		opts = option.WithCredentialsJSON(account.jsonKey)
 	} else {
 		log.Printf("[INFO] Requesting Google token via GCE API Default Client Token Source...")
-		client, err = google.DefaultClient(oauth2.NoContext, DriverScopes...)
+		ts, err := google.DefaultTokenSource(context.TODO(), "https://www.googleapis.com/auth/cloud-platform")
+		if err != nil {
+			return nil, err
+		}
+		opts = option.WithTokenSource(ts)
 		// The DefaultClient uses the DefaultTokenSource of the google lib.
 		// The DefaultTokenSource uses the "Application Default Credentials"
 		// It looks for credentials in the following places, preferring the first location found:
@@ -73,39 +119,59 @@ func NewDriverGCE(ui packer.Ui, p string, a *AccountFile) (Driver, error) {
 		// 4. On Google Compute Engine and Google App Engine Managed VMs, it fetches
 		//    credentials from the metadata server.
 		//    (In this final case any provided scopes are ignored.)
+		//
+		//    Note: (4) is not usable with OSLogin on Google Compute Engine (GCE).
+		//    The GCE service account is derived separately and used instead.
 	}
 
+	if err != nil {
+		return nil, err
+	}
+
+	return opts, nil
+}
+
+func NewDriverGCE(config GCEDriverConfig) (Driver, error) {
+
+	opts, err := NewClientOptionGoogle(config.Account, config.VaultOauthEngineName, config.ImpersonateServiceAccountName)
 	if err != nil {
 		return nil, err
 	}
 
 	log.Printf("[INFO] Instantiating GCE client...")
-	service, err := compute.New(client)
-	// Set UserAgent
-	versionString := version.FormattedVersion()
-	service.UserAgent = fmt.Sprintf(
-		"(%s %s) Packer/%s", runtime.GOOS, runtime.GOARCH, versionString)
-
+	service, err := compute.NewService(context.TODO(), opts)
 	if err != nil {
 		return nil, err
 	}
 
+	log.Printf("[INFO] Instantiating OS Login client...")
+	osLoginService, err := oslogin.NewService(context.TODO(), opts)
+	if err != nil {
+		return nil, err
+	}
+
+	// Set UserAgent
+	service.UserAgent = useragent.String(version.GCEPluginVersion.FormattedVersion())
+
 	return &driverGCE{
-		projectId: p,
-		service:   service,
-		ui:        ui,
+		projectId:      config.ProjectId,
+		service:        service,
+		osLoginService: osLoginService,
+		ui:             config.Ui,
 	}, nil
 }
 
-func (d *driverGCE) CreateImage(name, description, family, zone, disk string, image_labels map[string]string, image_licenses []string) (<-chan *Image, <-chan error) {
+func (d *driverGCE) CreateImage(name, description, family, zone, disk string, image_labels map[string]string, image_licenses []string, image_encryption_key *compute.CustomerEncryptionKey, imageStorageLocations []string) (<-chan *Image, <-chan error) {
 	gce_image := &compute.Image{
-		Description: description,
-		Name:        name,
-		Family:      family,
-		Labels:      image_labels,
-		Licenses:    image_licenses,
-		SourceDisk:  fmt.Sprintf("%s%s/zones/%s/disks/%s", d.service.BasePath, d.projectId, zone, disk),
-		SourceType:  "RAW",
+		Description:        description,
+		Name:               name,
+		Family:             family,
+		Labels:             image_labels,
+		Licenses:           image_licenses,
+		ImageEncryptionKey: image_encryption_key,
+		SourceDisk:         fmt.Sprintf("%s%s/zones/%s/disks/%s", d.service.BasePath, d.projectId, zone, disk),
+		SourceType:         "RAW",
+		StorageLocations:   imageStorageLocations,
 	}
 
 	imageCh := make(chan *Image, 1)
@@ -169,14 +235,38 @@ func (d *driverGCE) DeleteDisk(zone, name string) (<-chan error, error) {
 	go waitForState(errCh, "DONE", d.refreshZoneOp(zone, op))
 	return errCh, nil
 }
-
 func (d *driverGCE) GetImage(name string, fromFamily bool) (*Image, error) {
-	projects := []string{d.projectId, "centos-cloud", "coreos-cloud", "cos-cloud", "debian-cloud", "google-containers", "opensuse-cloud", "rhel-cloud", "suse-cloud", "ubuntu-os-cloud", "windows-cloud", "gce-nvme"}
+
+	projects := []string{
+		d.projectId,
+		// Public projects, drawn from
+		// https://cloud.google.com/compute/docs/images
+		"centos-cloud",
+		"cos-cloud",
+		"coreos-cloud",
+		"debian-cloud",
+		"rhel-cloud",
+		"rhel-sap-cloud",
+		"suse-cloud",
+		"suse-sap-cloud",
+		"suse-byos-cloud",
+		"ubuntu-os-cloud",
+		"windows-cloud",
+		"windows-sql-cloud",
+		"gce-uefi-images",
+		"gce-nvme",
+		// misc
+		"google-containers",
+		"opensuse-cloud",
+	}
+	return d.GetImageFromProjects(projects, name, fromFamily)
+}
+func (d *driverGCE) GetImageFromProjects(projects []string, name string, fromFamily bool) (*Image, error) {
 	var errs error
 	for _, project := range projects {
 		image, err := d.GetImageFromProject(project, name, fromFamily)
 		if err != nil {
-			errs = packer.MultiErrorAppend(errs, err)
+			errs = packersdk.MultiErrorAppend(errs, err)
 		}
 		if image != nil {
 			return image, nil
@@ -206,11 +296,12 @@ func (d *driverGCE) GetImageFromProject(project, name string, fromFamily bool) (
 		return nil, fmt.Errorf("Image, %s, could not be found in project: %s", name, project)
 	} else {
 		return &Image{
-			Licenses:  image.Licenses,
-			Name:      image.Name,
-			ProjectId: project,
-			SelfLink:  image.SelfLink,
-			SizeGb:    image.DiskSizeGb,
+			GuestOsFeatures: image.GuestOsFeatures,
+			Licenses:        image.Licenses,
+			Name:            image.Name,
+			ProjectId:       project,
+			SelfLink:        image.SelfLink,
+			SizeGb:          image.DiskSizeGb,
 		}, nil
 	}
 }
@@ -343,6 +434,20 @@ func (d *driverGCE) RunInstance(c *InstanceConfig) (<-chan error, error) {
 		guestAccelerators = append(guestAccelerators, ac)
 	}
 
+	// Configure the instance's service account. If the user has set
+	// disable_default_service_account, then the default service account
+	// will not be used. If they also do not set service_account_email, then
+	// the instance will be created with no service account or scopes.
+	serviceAccount := &compute.ServiceAccount{}
+	if !c.DisableDefaultServiceAccount {
+		serviceAccount.Email = "default"
+		serviceAccount.Scopes = c.Scopes
+	}
+	if c.ServiceAccountEmail != "" {
+		serviceAccount.Email = c.ServiceAccountEmail
+		serviceAccount.Scopes = c.Scopes
+	}
+
 	// Create the instance information
 	instance := compute.Instance{
 		Description: c.Description,
@@ -366,7 +471,8 @@ func (d *driverGCE) RunInstance(c *InstanceConfig) (<-chan error, error) {
 		Metadata: &compute.Metadata{
 			Items: metadata,
 		},
-		Name: c.Name,
+		MinCpuPlatform: c.MinCpuPlatform,
+		Name:           c.Name,
 		NetworkInterfaces: []*compute.NetworkInterface{
 			{
 				AccessConfigs: []*compute.AccessConfig{accessconfig},
@@ -379,17 +485,30 @@ func (d *driverGCE) RunInstance(c *InstanceConfig) (<-chan error, error) {
 			Preemptible:       c.Preemptible,
 		},
 		ServiceAccounts: []*compute.ServiceAccount{
-			{
-				Email:  "default",
-				Scopes: c.Scopes,
-			},
+			serviceAccount,
 		},
 		Tags: &compute.Tags{
 			Items: c.Tags,
 		},
 	}
 
-	d.ui.Message("Requesting instance creation...")
+	// Shielded VMs configuration. If the user has set at least one of the
+	// options, the shielded VM configuration will reflect that. If they
+	// don't set any of the options the settings will default to the ones
+	// of the source compute image which is used for creating the virtual
+	// machine.
+	shieldedInstanceConfig := &compute.ShieldedInstanceConfig{
+		EnableSecureBoot:          c.EnableSecureBoot,
+		EnableVtpm:                c.EnableVtpm,
+		EnableIntegrityMonitoring: c.EnableIntegrityMonitoring,
+	}
+	shieldedUiMessage := ""
+	if c.EnableSecureBoot || c.EnableVtpm || c.EnableIntegrityMonitoring {
+		instance.ShieldedInstanceConfig = shieldedInstanceConfig
+		shieldedUiMessage = " Shielded VM"
+	}
+
+	d.ui.Message(fmt.Sprintf("Requesting%s instance creation...", shieldedUiMessage))
 	op, err := d.service.Instances.Insert(d.projectId, zone.Name, &instance).Do()
 	if err != nil {
 		return nil, err
@@ -419,6 +538,10 @@ func (d *driverGCE) createWindowsPassword(errCh chan<- error, name, zone string,
 	dCopy := string(data)
 
 	instance, err := d.service.Instances.Get(d.projectId, zone, name).Do()
+	if err != nil {
+		errCh <- err
+		return
+	}
 	instance.Metadata.Items = append(instance.Metadata.Items, &compute.MetadataItems{Key: "windows-keys", Value: &dCopy})
 
 	op, err := d.service.Instances.SetMetadata(d.projectId, zone, name, &compute.Metadata{
@@ -506,6 +629,29 @@ func (d *driverGCE) getPasswordResponses(zone, instance string) ([]windowsPasswo
 	return passwordResponses, nil
 }
 
+func (d *driverGCE) ImportOSLoginSSHKey(user, sshPublicKey string) (*oslogin.LoginProfile, error) {
+	parent := fmt.Sprintf("users/%s", user)
+
+	resp, err := d.osLoginService.Users.ImportSshPublicKey(parent, &oslogin.SshPublicKey{
+		Key: sshPublicKey,
+	}).Do()
+	if err != nil {
+		return nil, err
+	}
+
+	return resp.LoginProfile, nil
+}
+
+func (d *driverGCE) DeleteOSLoginSSHKey(user, fingerprint string) error {
+	name := fmt.Sprintf("users/%s/sshPublicKeys/%s", user, fingerprint)
+	_, err := d.osLoginService.Users.SshPublicKeys.Delete(name).Do()
+	if err != nil {
+		return err
+	}
+
+	return nil
+}
+
 func (d *driverGCE) WaitForInstance(state, zone, name string) <-chan error {
 	errCh := make(chan error, 1)
 	go waitForState(errCh, state, d.refreshInstanceState(zone, name))
@@ -534,7 +680,7 @@ func (d *driverGCE) refreshGlobalOp(op *compute.Operation) stateRefreshFunc {
 		if newOp.Status == "DONE" {
 			if newOp.Error != nil {
 				for _, e := range newOp.Error.Errors {
-					err = packer.MultiErrorAppend(err, fmt.Errorf(e.Message))
+					err = packersdk.MultiErrorAppend(err, fmt.Errorf(e.Message))
 				}
 			}
 		}
@@ -555,7 +701,7 @@ func (d *driverGCE) refreshZoneOp(zone string, op *compute.Operation) stateRefre
 		if newOp.Status == "DONE" {
 			if newOp.Error != nil {
 				for _, e := range newOp.Error.Errors {
-					err = packer.MultiErrorAppend(err, fmt.Errorf(e.Message))
+					err = packersdk.MultiErrorAppend(err, fmt.Errorf(e.Message))
 				}
 			}
 		}
@@ -570,15 +716,67 @@ type stateRefreshFunc func() (string, error)
 // waitForState will spin in a loop forever waiting for state to
 // reach a certain target.
 func waitForState(errCh chan<- error, target string, refresh stateRefreshFunc) error {
-	err := common.Retry(2, 2, 0, func(_ uint) (bool, error) {
+	ctx := context.TODO()
+	err := retry.Config{
+		RetryDelay: (&retry.Backoff{InitialBackoff: 2 * time.Second, MaxBackoff: 2 * time.Second, Multiplier: 2}).Linear,
+	}.Run(ctx, func(ctx context.Context) error {
 		state, err := refresh()
 		if err != nil {
-			return false, err
-		} else if state == target {
-			return true, nil
+			return err
 		}
-		return false, nil
+		if state == target {
+			return nil
+		}
+		return fmt.Errorf("retrying for state %s, got %s", target, state)
 	})
 	errCh <- err
 	return err
+}
+
+func (d *driverGCE) AddToInstanceMetadata(zone string, name string, metadata map[string]string) error {
+
+	instance, err := d.service.Instances.Get(d.projectId, zone, name).Do()
+	if err != nil {
+		return err
+	}
+
+	// Build up the metadata
+	metadataForInstance := make([]*compute.MetadataItems, len(metadata))
+	for k, v := range metadata {
+		vCopy := v
+		metadataForInstance = append(metadataForInstance, &compute.MetadataItems{
+			Key:   k,
+			Value: &vCopy,
+		})
+	}
+
+	instance.Metadata.Items = append(instance.Metadata.Items, metadataForInstance...)
+
+	op, err := d.service.Instances.SetMetadata(d.projectId, zone, name, &compute.Metadata{
+		Fingerprint: instance.Metadata.Fingerprint,
+		Items:       instance.Metadata.Items,
+	}).Do()
+
+	if err != nil {
+		return err
+	}
+
+	newErrCh := make(chan error, 1)
+
+	go func() {
+		err = waitForState(newErrCh, "DONE", d.refreshZoneOp(zone, op))
+
+		select {
+		case err = <-newErrCh:
+		case <-time.After(time.Second * 30):
+			err = errors.New("time out while waiting for instance to create")
+		}
+	}()
+
+	if err != nil {
+		newErrCh <- err
+		return err
+	}
+
+	return nil
 }

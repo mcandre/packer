@@ -4,15 +4,16 @@ import (
 	"strconv"
 	"testing"
 
-	"github.com/hashicorp/packer/packer"
+	packersdk "github.com/hashicorp/packer-plugin-sdk/packer"
 )
 
 func testConfig() map[string]interface{} {
 	return map[string]interface{}{
-		"api_access_key":  "foo",
-		"api_token":       "bar",
-		"region":          "ams1",
-		"commercial_type": "VC1S",
+		"project_id":      "00000000-1111-2222-3333-444444444444",
+		"access_key":      "SCWABCXXXXXXXXXXXXXX",
+		"secret_key":      "00000000-1111-2222-3333-444444444444",
+		"zone":            "fr-par-1",
+		"commercial_type": "START1-S",
 		"ssh_username":    "root",
 		"image":           "image-uuid",
 	}
@@ -21,7 +22,7 @@ func testConfig() map[string]interface{} {
 func TestBuilder_ImplementsBuilder(t *testing.T) {
 	var raw interface{}
 	raw = &Builder{}
-	if _, ok := raw.(packer.Builder); !ok {
+	if _, ok := raw.(packersdk.Builder); !ok {
 		t.Fatalf("Builder should be a builder")
 	}
 }
@@ -32,12 +33,22 @@ func TestBuilder_Prepare_BadType(t *testing.T) {
 		"api_token": []string{},
 	}
 
-	warnings, err := b.Prepare(c)
+	_, _, err := b.Prepare(c)
+	if err == nil {
+		t.Fatalf("prepare should fail")
+	}
+}
+
+func TestBuilderPrepare(t *testing.T) {
+	var b Builder
+	config := testConfig()
+
+	_, warnings, err := b.Prepare(config)
 	if len(warnings) > 0 {
 		t.Fatalf("bad: %#v", warnings)
 	}
-	if err == nil {
-		t.Fatalf("prepare should fail")
+	if err != nil {
+		t.Fatal("should not have errors")
 	}
 }
 
@@ -46,7 +57,7 @@ func TestBuilderPrepare_InvalidKey(t *testing.T) {
 	config := testConfig()
 
 	config["i_should_not_be_valid"] = true
-	warnings, err := b.Prepare(config)
+	_, warnings, err := b.Prepare(config)
 	if len(warnings) > 0 {
 		t.Fatalf("bad: %#v", warnings)
 	}
@@ -55,12 +66,12 @@ func TestBuilderPrepare_InvalidKey(t *testing.T) {
 	}
 }
 
-func TestBuilderPrepare_Region(t *testing.T) {
+func TestBuilderPrepare_Zone(t *testing.T) {
 	var b Builder
 	config := testConfig()
 
-	delete(config, "region")
-	warnings, err := b.Prepare(config)
+	delete(config, "zone")
+	_, warnings, err := b.Prepare(config)
 	if len(warnings) > 0 {
 		t.Fatalf("bad: %#v", warnings)
 	}
@@ -68,11 +79,11 @@ func TestBuilderPrepare_Region(t *testing.T) {
 		t.Fatalf("should error")
 	}
 
-	expected := "ams1"
+	expected := "fr-par-1"
 
-	config["region"] = expected
+	config["zone"] = expected
 	b = Builder{}
-	warnings, err = b.Prepare(config)
+	_, warnings, err = b.Prepare(config)
 	if len(warnings) > 0 {
 		t.Fatalf("bad: %#v", warnings)
 	}
@@ -80,8 +91,8 @@ func TestBuilderPrepare_Region(t *testing.T) {
 		t.Fatalf("should not have error: %s", err)
 	}
 
-	if b.config.Region != expected {
-		t.Errorf("found %s, expected %s", b.config.Region, expected)
+	if b.config.Zone != expected {
+		t.Errorf("found %s, expected %s", b.config.Zone, expected)
 	}
 }
 
@@ -90,7 +101,7 @@ func TestBuilderPrepare_CommercialType(t *testing.T) {
 	config := testConfig()
 
 	delete(config, "commercial_type")
-	warnings, err := b.Prepare(config)
+	_, warnings, err := b.Prepare(config)
 	if len(warnings) > 0 {
 		t.Fatalf("bad: %#v", warnings)
 	}
@@ -98,11 +109,11 @@ func TestBuilderPrepare_CommercialType(t *testing.T) {
 		t.Fatalf("should error")
 	}
 
-	expected := "VC1S"
+	expected := "START1-S"
 
 	config["commercial_type"] = expected
 	b = Builder{}
-	warnings, err = b.Prepare(config)
+	_, warnings, err = b.Prepare(config)
 	if len(warnings) > 0 {
 		t.Fatalf("bad: %#v", warnings)
 	}
@@ -120,7 +131,7 @@ func TestBuilderPrepare_Image(t *testing.T) {
 	config := testConfig()
 
 	delete(config, "image")
-	warnings, err := b.Prepare(config)
+	_, warnings, err := b.Prepare(config)
 	if len(warnings) > 0 {
 		t.Fatalf("bad: %#v", warnings)
 	}
@@ -132,7 +143,7 @@ func TestBuilderPrepare_Image(t *testing.T) {
 
 	config["image"] = expected
 	b = Builder{}
-	warnings, err = b.Prepare(config)
+	_, warnings, err = b.Prepare(config)
 	if len(warnings) > 0 {
 		t.Fatalf("bad: %#v", warnings)
 	}
@@ -149,7 +160,7 @@ func TestBuilderPrepare_SnapshotName(t *testing.T) {
 	var b Builder
 	config := testConfig()
 
-	warnings, err := b.Prepare(config)
+	_, warnings, err := b.Prepare(config)
 	if len(warnings) > 0 {
 		t.Fatalf("bad: %#v", warnings)
 	}
@@ -163,7 +174,7 @@ func TestBuilderPrepare_SnapshotName(t *testing.T) {
 
 	config["snapshot_name"] = "foobarbaz"
 	b = Builder{}
-	warnings, err = b.Prepare(config)
+	_, warnings, err = b.Prepare(config)
 	if len(warnings) > 0 {
 		t.Fatalf("bad: %#v", warnings)
 	}
@@ -173,7 +184,7 @@ func TestBuilderPrepare_SnapshotName(t *testing.T) {
 
 	config["snapshot_name"] = "{{timestamp}}"
 	b = Builder{}
-	warnings, err = b.Prepare(config)
+	_, warnings, err = b.Prepare(config)
 	if len(warnings) > 0 {
 		t.Fatalf("bad: %#v", warnings)
 	}
@@ -192,7 +203,7 @@ func TestBuilderPrepare_ServerName(t *testing.T) {
 	var b Builder
 	config := testConfig()
 
-	warnings, err := b.Prepare(config)
+	_, warnings, err := b.Prepare(config)
 	if len(warnings) > 0 {
 		t.Fatalf("bad: %#v", warnings)
 	}
@@ -206,7 +217,7 @@ func TestBuilderPrepare_ServerName(t *testing.T) {
 
 	config["server_name"] = "foobar"
 	b = Builder{}
-	warnings, err = b.Prepare(config)
+	_, warnings, err = b.Prepare(config)
 	if len(warnings) > 0 {
 		t.Fatalf("bad: %#v", warnings)
 	}
@@ -216,7 +227,7 @@ func TestBuilderPrepare_ServerName(t *testing.T) {
 
 	config["server_name"] = "foobar-{{timestamp}}"
 	b = Builder{}
-	warnings, err = b.Prepare(config)
+	_, warnings, err = b.Prepare(config)
 	if len(warnings) > 0 {
 		t.Fatalf("bad: %#v", warnings)
 	}
@@ -226,7 +237,7 @@ func TestBuilderPrepare_ServerName(t *testing.T) {
 
 	config["server_name"] = "foobar-{{"
 	b = Builder{}
-	warnings, err = b.Prepare(config)
+	_, warnings, err = b.Prepare(config)
 	if len(warnings) > 0 {
 		t.Fatalf("bad: %#v", warnings)
 	}

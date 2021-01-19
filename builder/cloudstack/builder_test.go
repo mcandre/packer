@@ -3,14 +3,14 @@ package cloudstack
 import (
 	"testing"
 
-	"github.com/hashicorp/packer/packer"
+	packersdk "github.com/hashicorp/packer-plugin-sdk/packer"
 )
 
 func TestBuilder_Impl(t *testing.T) {
 	var raw interface{} = &Builder{}
 
-	if _, ok := raw.(packer.Builder); !ok {
-		t.Fatalf("Builder does not implement packer.Builder")
+	if _, ok := raw.(packersdk.Builder); !ok {
+		t.Fatalf("Builder does not implement packersdk.Builder")
 	}
 }
 
@@ -40,10 +40,8 @@ func TestBuilder_Prepare(t *testing.T) {
 		},
 	}
 
-	b := &Builder{}
-
 	for desc, tc := range cases {
-		_, errs := b.Prepare(tc.Config)
+		_, _, errs := (&Builder{}).Prepare(tc.Config)
 
 		if tc.Err {
 			if errs == nil {

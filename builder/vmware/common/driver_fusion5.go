@@ -4,12 +4,13 @@ import (
 	"errors"
 	"fmt"
 	"io/ioutil"
+	"log"
 	"os"
 	"os/exec"
 	"path/filepath"
 	"strings"
 
-	"github.com/hashicorp/packer/helper/multistep"
+	"github.com/hashicorp/packer-plugin-sdk/multistep"
 )
 
 // Fusion5Driver is a driver that can run VMware Fusion 5.
@@ -23,7 +24,14 @@ type Fusion5Driver struct {
 	SSHConfig *SSHConfig
 }
 
-func (d *Fusion5Driver) Clone(dst, src string) error {
+func NewFusion5Driver(dconfig *DriverConfig, config *SSHConfig) Driver {
+	return &Fusion5Driver{
+		AppPath:   dconfig.FusionAppPath,
+		SSHConfig: config,
+	}
+}
+
+func (d *Fusion5Driver) Clone(dst, src string, linked bool) error {
 	return errors.New("Cloning is not supported with Fusion 5. Please use Fusion 6+.")
 }
 
@@ -157,6 +165,7 @@ func (d *Fusion5Driver) Verify() error {
 		if _, err := os.Stat(pathNetworking); err != nil {
 			return nil, fmt.Errorf("Could not find networking conf file: %s", pathNetworking)
 		}
+		log.Printf("Located networkmapper configuration file using Fusion5: %s", pathNetworking)
 
 		fd, err := os.Open(pathNetworking)
 		if err != nil {

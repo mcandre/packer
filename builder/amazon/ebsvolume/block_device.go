@@ -1,29 +1,48 @@
+//go:generate struct-markdown
+
 package ebsvolume
 
 import (
+	"github.com/aws/aws-sdk-go/service/ec2"
+	"github.com/hashicorp/packer-plugin-sdk/template/config"
+	"github.com/hashicorp/packer-plugin-sdk/template/interpolate"
 	awscommon "github.com/hashicorp/packer/builder/amazon/common"
-	"github.com/hashicorp/packer/template/interpolate"
 )
 
 type BlockDevice struct {
-	awscommon.BlockDevice `mapstructure:"-,squash"`
-	Tags                  awscommon.TagMap `mapstructure:"tags"`
+	awscommon.BlockDevice `mapstructure:",squash"`
+	// Key/value pair tags to apply to the volume. These are retained after the builder
+	// completes. This is a [template engine](/docs/templates/engine), see
+	// [Build template data](#build-template-data) for more information.
+	Tags map[string]string `mapstructure:"tags" required:"false"`
+	// Same as [`tags`](#tags) but defined as a singular repeatable block
+	// containing a `key` and a `value` field. In HCL2 mode the
+	// [`dynamic_block`](/docs/templates/hcl_templates/expressions#dynamic-blocks)
+	// will allow you to create those programatically.
+	Tag config.KeyValues `mapstructure:"tag" required:"false"`
 }
 
-func commonBlockDevices(mappings []BlockDevice, ctx *interpolate.Context) (awscommon.BlockDevices, error) {
-	result := make([]awscommon.BlockDevice, len(mappings))
+type BlockDevices []BlockDevice
 
-	for i, mapping := range mappings {
-		interpolateBlockDev, err := interpolate.RenderInterface(&mapping.BlockDevice, ctx)
-		if err != nil {
-			return awscommon.BlockDevices{}, err
-		}
-		result[i] = *interpolateBlockDev.(*awscommon.BlockDevice)
+func (bds BlockDevices) BuildEC2BlockDeviceMappings() []*ec2.BlockDeviceMapping {
+	var blockDevices []*ec2.BlockDeviceMapping
+
+	for _, blockDevice := range bds {
+		blockDevices = append(blockDevices, blockDevice.BuildEC2BlockDeviceMapping())
 	}
+	return blockDevices
+}
 
-	return awscommon.BlockDevices{
-		LaunchBlockDevices: awscommon.LaunchBlockDevices{
-			LaunchMappings: result,
-		},
-	}, nil
+func (bds BlockDevices) Prepare(ctx *interpolate.Context) (errs []error) {
+
+	for _, block := range bds {
+
+		errs = append(errs, block.Tag.CopyOn(&block.Tags)...)
+
+		if err := block.Prepare(ctx); err != nil {
+			errs = append(errs, err)
+		}
+
+	}
+	return errs
 }

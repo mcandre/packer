@@ -8,17 +8,16 @@ import (
 	"net"
 	"strings"
 
-	"github.com/hashicorp/packer/common"
-	"github.com/hashicorp/packer/helper/multistep"
-	"github.com/hashicorp/packer/packer"
-	"github.com/hashicorp/packer/template/interpolate"
+	"github.com/hashicorp/packer-plugin-sdk/multistep"
+	packersdk "github.com/hashicorp/packer-plugin-sdk/packer"
+	"github.com/hashicorp/packer-plugin-sdk/template/interpolate"
 	"github.com/xanzy/go-cloudstack/cloudstack"
 )
 
 // userDataTemplateData represents variables for user_data interpolation
 type userDataTemplateData struct {
 	HTTPIP   string
-	HTTPPort uint
+	HTTPPort int
 }
 
 // stepCreateInstance represents a Packer build step that creates CloudStack instances.
@@ -28,10 +27,10 @@ type stepCreateInstance struct {
 }
 
 // Run executes the Packer build step that creates a CloudStack instance.
-func (s *stepCreateInstance) Run(_ context.Context, state multistep.StateBag) multistep.StepAction {
+func (s *stepCreateInstance) Run(ctx context.Context, state multistep.StateBag) multistep.StepAction {
 	client := state.Get("client").(*cloudstack.CloudStackClient)
 	config := state.Get("config").(*Config)
-	ui := state.Get("ui").(packer.Ui)
+	ui := state.Get("ui").(packersdk.Ui)
 
 	ui.Say("Creating instance...")
 
@@ -44,10 +43,11 @@ func (s *stepCreateInstance) Run(_ context.Context, state multistep.StateBag) mu
 
 	// Configure the instance.
 	p.SetName(config.InstanceName)
-	p.SetDisplayname("Created by Packer")
+	p.SetDisplayname(config.InstanceDisplayName)
 
-	if keypair, ok := state.GetOk("keypair"); ok {
-		p.SetKeypair(keypair.(string))
+	if len(config.Comm.SSHKeyPairName) != 0 {
+		ui.Message(fmt.Sprintf("Using keypair: %s", config.Comm.SSHKeyPairName))
+		p.SetKeypair(config.Comm.SSHKeyPairName)
 	}
 
 	if securitygroups, ok := state.GetOk("security_groups"); ok {
@@ -85,7 +85,7 @@ func (s *stepCreateInstance) Run(_ context.Context, state multistep.StateBag) mu
 	}
 
 	if config.UserData != "" {
-		httpPort := state.Get("http_port").(uint)
+		httpPort := state.Get("http_port").(int)
 		httpIP, err := hostIP()
 		if err != nil {
 			err := fmt.Errorf("Failed to determine host IP: %s", err)
@@ -93,7 +93,7 @@ func (s *stepCreateInstance) Run(_ context.Context, state multistep.StateBag) mu
 			ui.Error(err.Error())
 			return multistep.ActionHalt
 		}
-		common.SetHTTPIP(httpIP)
+		state.Put("http_ip", httpIP)
 
 		s.Ctx.Data = &userDataTemplateData{
 			httpIP,
@@ -120,6 +120,7 @@ func (s *stepCreateInstance) Run(_ context.Context, state multistep.StateBag) mu
 	}
 
 	ui.Message("Instance has been created!")
+	ui.Message(fmt.Sprintf("Instance ID: %s", instance.Id))
 
 	// In debug-mode, we output the password
 	if s.Debug {
@@ -147,6 +148,20 @@ func (s *stepCreateInstance) Run(_ context.Context, state multistep.StateBag) mu
 	// Store the instance ID so we can remove it later.
 	state.Put("instance_id", instance.Id)
 
+	// Set instance tags
+	if len(config.Tags) > 0 {
+		resourceID := []string{instance.Id}
+		tp := client.Resourcetags.NewCreateTagsParams(resourceID, "UserVm", config.Tags)
+
+		_, err = client.Resourcetags.CreateTags(tp)
+
+		if err != nil {
+			state.Put("error", err)
+			ui.Error(err.Error())
+			return multistep.ActionHalt
+		}
+	}
+
 	return multistep.ActionContinue
 }
 
@@ -154,7 +169,7 @@ func (s *stepCreateInstance) Run(_ context.Context, state multistep.StateBag) mu
 func (s *stepCreateInstance) Cleanup(state multistep.StateBag) {
 	client := state.Get("client").(*cloudstack.CloudStackClient)
 	config := state.Get("config").(*Config)
-	ui := state.Get("ui").(packer.Ui)
+	ui := state.Get("ui").(packersdk.Ui)
 
 	instanceID, ok := state.Get("instance_id").(string)
 	if !ok || instanceID == "" {
@@ -226,7 +241,7 @@ func (s *stepCreateInstance) generateUserData(userData string, httpGETOnly bool)
 	if len(ud) > maxUD {
 		return "", fmt.Errorf(
 			"The supplied user_data contains %d bytes after encoding, "+
-				"this exeeds the limit of %d bytes", len(ud), maxUD)
+				"this exceeds the limit of %d bytes", len(ud), maxUD)
 	}
 
 	return ud, nil

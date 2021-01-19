@@ -1,23 +1,27 @@
+//go:generate mapstructure-to-hcl2 -type Config
+
 // This package implements a provisioner for Packer that executes a
 // saltstack state within the remote machine
 package saltmasterless
 
 import (
 	"bytes"
+	"context"
 	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
+	"regexp"
+	"strings"
 
-	"github.com/hashicorp/packer/common"
-	"github.com/hashicorp/packer/helper/config"
-	"github.com/hashicorp/packer/packer"
-	"github.com/hashicorp/packer/template/interpolate"
+	"github.com/hashicorp/go-getter/v2"
+	"github.com/hashicorp/hcl/v2/hcldec"
+	"github.com/hashicorp/packer-plugin-sdk/common"
+	"github.com/hashicorp/packer-plugin-sdk/guestexec"
+	packersdk "github.com/hashicorp/packer-plugin-sdk/packer"
+	"github.com/hashicorp/packer-plugin-sdk/template/config"
+	"github.com/hashicorp/packer-plugin-sdk/template/interpolate"
 )
-
-const DefaultTempConfigDir = "/tmp/salt"
-const DefaultStateTreeDir = "/srv/salt"
-const DefaultPillarRootDir = "/srv/pillar"
 
 type Config struct {
 	common.PackerConfig `mapstructure:",squash"`
@@ -65,17 +69,56 @@ type Config struct {
 	SaltBinDir string `mapstructure:"salt_bin_dir"`
 
 	// Command line args passed onto salt-call
-	CmdArgs string ""
+	CmdArgs string `mapstructure-to-hcl2:",skip"`
+
+	// The Guest OS Type (unix or windows)
+	GuestOSType string `mapstructure:"guest_os_type"`
+
+	// An array of private or community git source formulas
+	Formulas []string `mapstructure:"formulas"`
 
 	ctx interpolate.Context
 }
 
 type Provisioner struct {
-	config Config
+	config            Config
+	guestOSTypeConfig guestOSTypeConfig
+	guestCommands     *guestexec.GuestCommands
 }
+
+type guestOSTypeConfig struct {
+	tempDir           string
+	stateRoot         string
+	pillarRoot        string
+	configDir         string
+	bootstrapFetchCmd string
+	bootstrapRunCmd   string
+}
+
+var guestOSTypeConfigs = map[string]guestOSTypeConfig{
+	guestexec.UnixOSType: {
+		configDir:         "/etc/salt",
+		tempDir:           "/tmp/salt",
+		stateRoot:         "/srv/salt",
+		pillarRoot:        "/srv/pillar",
+		bootstrapFetchCmd: "curl -L https://bootstrap.saltstack.com -o /tmp/install_salt.sh || wget -O /tmp/install_salt.sh https://bootstrap.saltstack.com",
+		bootstrapRunCmd:   "sh /tmp/install_salt.sh",
+	},
+	guestexec.WindowsOSType: {
+		configDir:         "C:/salt/conf",
+		tempDir:           "C:/Windows/Temp/salt/",
+		stateRoot:         "C:/salt/state",
+		pillarRoot:        "C:/salt/pillar/",
+		bootstrapFetchCmd: "powershell Invoke-WebRequest -Uri 'https://raw.githubusercontent.com/saltstack/salt-bootstrap/stable/bootstrap-salt.ps1' -OutFile 'C:/Windows/Temp/bootstrap-salt.ps1'",
+		bootstrapRunCmd:   "Powershell C:/Windows/Temp/bootstrap-salt.ps1",
+	},
+}
+
+func (p *Provisioner) ConfigSpec() hcldec.ObjectSpec { return p.config.FlatMapstructure().HCL2Spec() }
 
 func (p *Provisioner) Prepare(raws ...interface{}) error {
 	err := config.Decode(&p.config, &config.DecodeOpts{
+		PluginType:         "salt-masterless",
 		Interpolate:        true,
 		InterpolateContext: &p.config.ctx,
 		InterpolateFilter: &interpolate.RenderFilter{
@@ -86,36 +129,61 @@ func (p *Provisioner) Prepare(raws ...interface{}) error {
 		return err
 	}
 
-	if p.config.TempConfigDir == "" {
-		p.config.TempConfigDir = DefaultTempConfigDir
+	if p.config.GuestOSType == "" {
+		p.config.GuestOSType = guestexec.DefaultOSType
+	} else {
+		p.config.GuestOSType = strings.ToLower(p.config.GuestOSType)
 	}
 
-	var errs *packer.MultiError
+	var ok bool
+	p.guestOSTypeConfig, ok = guestOSTypeConfigs[p.config.GuestOSType]
+	if !ok {
+		return fmt.Errorf("Invalid guest_os_type: \"%s\"", p.config.GuestOSType)
+	}
+
+	p.guestCommands, err = guestexec.NewGuestCommands(p.config.GuestOSType, !p.config.DisableSudo)
+	if err != nil {
+		return fmt.Errorf("Invalid guest_os_type: \"%s\"", p.config.GuestOSType)
+	}
+
+	if p.config.TempConfigDir == "" {
+		p.config.TempConfigDir = p.guestOSTypeConfig.tempDir
+	}
+
+	var errs *packersdk.MultiError
 
 	// require a salt state tree
 	err = validateDirConfig(p.config.LocalStateTree, "local_state_tree", true)
 	if err != nil {
-		errs = packer.MultiErrorAppend(errs, err)
+		errs = packersdk.MultiErrorAppend(errs, err)
+	}
+
+	if p.config.Formulas != nil && len(p.config.Formulas) > 0 {
+
+		validURLs := hasValidFormulaURLs(p.config.Formulas)
+		if !validURLs {
+			errs = packersdk.MultiErrorAppend(errs, fmt.Errorf("Invalid formula URL. Please verify the git URLs also contain a '//' subdir"))
+		}
 	}
 
 	err = validateDirConfig(p.config.LocalPillarRoots, "local_pillar_roots", false)
 	if err != nil {
-		errs = packer.MultiErrorAppend(errs, err)
+		errs = packersdk.MultiErrorAppend(errs, err)
 	}
 
 	err = validateFileConfig(p.config.MinionConfig, "minion_config", false)
 	if err != nil {
-		errs = packer.MultiErrorAppend(errs, err)
+		errs = packersdk.MultiErrorAppend(errs, err)
 	}
 
 	if p.config.MinionConfig != "" && (p.config.RemoteStateTree != "" || p.config.RemotePillarRoots != "") {
-		errs = packer.MultiErrorAppend(errs,
+		errs = packersdk.MultiErrorAppend(errs,
 			errors.New("remote_state_tree and remote_pillar_roots only apply when minion_config is not used"))
 	}
 
 	err = validateFileConfig(p.config.GrainsFile, "grains_file", false)
 	if err != nil {
-		errs = packer.MultiErrorAppend(errs, err)
+		errs = packersdk.MultiErrorAppend(errs, err)
 	}
 
 	// build the command line args to pass onto salt
@@ -135,14 +203,14 @@ func (p *Provisioner) Prepare(raws ...interface{}) error {
 			cmd_args.WriteString(p.config.RemoteStateTree)
 		} else {
 			cmd_args.WriteString(" --file-root=")
-			cmd_args.WriteString(DefaultStateTreeDir)
+			cmd_args.WriteString(p.guestOSTypeConfig.stateRoot)
 		}
 		if p.config.RemotePillarRoots != "" {
 			cmd_args.WriteString(" --pillar-root=")
 			cmd_args.WriteString(p.config.RemotePillarRoots)
 		} else {
 			cmd_args.WriteString(" --pillar-root=")
-			cmd_args.WriteString(DefaultPillarRootDir)
+			cmd_args.WriteString(p.guestOSTypeConfig.pillarRoot)
 		}
 	}
 
@@ -171,25 +239,54 @@ func (p *Provisioner) Prepare(raws ...interface{}) error {
 	return nil
 }
 
-func (p *Provisioner) Provision(ui packer.Ui, comm packer.Communicator) error {
+func (p *Provisioner) Provision(ctx context.Context, ui packersdk.Ui, comm packersdk.Communicator, _ map[string]interface{}) error {
 	var err error
 	var src, dst string
+	var formulas []string
+
+	if p.config.Formulas != nil && len(p.config.Formulas) > 0 {
+		ui.Say("Downloading Salt formulas...")
+		client := new(getter.Client)
+		for _, i := range p.config.Formulas {
+			req := getter.Request{
+				Src: i,
+			}
+			// Use //subdirectory name when creating in local_state_tree directory
+			state := strings.Split(i, "//")
+			last := state[len(state)-1]
+			path := filepath.Join(p.config.LocalStateTree, last)
+			formulas = append(formulas, path)
+			if _, err := os.Stat(path); os.IsNotExist(err) {
+				ui.Message(fmt.Sprintf("%s => %s", i, path))
+				if err = os.Mkdir(path, 0755); err != nil {
+					return fmt.Errorf("Unable to create Salt state directory: %s", err)
+				}
+				req.Dst = path
+				req.Mode = getter.ModeAny
+				if _, err := client.Get(ctx, &req); err != nil {
+					return fmt.Errorf("Unable to download Salt formula from %s: %s", i, err)
+				}
+			} else {
+				ui.Message(fmt.Sprintf("Found existing formula at: %s", path))
+			}
+		}
+	}
 
 	ui.Say("Provisioning with Salt...")
 	if !p.config.SkipBootstrap {
-		cmd := &packer.RemoteCmd{
+		cmd := &packersdk.RemoteCmd{
 			// Fallback on wget if curl failed for any reason (such as not being installed)
-			Command: fmt.Sprintf("curl -L https://bootstrap.saltstack.com -o /tmp/install_salt.sh || wget -O /tmp/install_salt.sh https://bootstrap.saltstack.com"),
+			Command: fmt.Sprintf(p.guestOSTypeConfig.bootstrapFetchCmd),
 		}
 		ui.Message(fmt.Sprintf("Downloading saltstack bootstrap to /tmp/install_salt.sh"))
-		if err = cmd.StartWithUi(comm, ui); err != nil {
+		if err = cmd.RunWithUi(ctx, comm, ui); err != nil {
 			return fmt.Errorf("Unable to download Salt: %s", err)
 		}
-		cmd = &packer.RemoteCmd{
-			Command: fmt.Sprintf("%s /tmp/install_salt.sh %s", p.sudo("sh"), p.config.BootstrapArgs),
+		cmd = &packersdk.RemoteCmd{
+			Command: fmt.Sprintf("%s %s", p.sudo(p.guestOSTypeConfig.bootstrapRunCmd), p.config.BootstrapArgs),
 		}
 		ui.Message(fmt.Sprintf("Installing Salt with command %s", cmd.Command))
-		if err = cmd.StartWithUi(comm, ui); err != nil {
+		if err = cmd.RunWithUi(ctx, comm, ui); err != nil {
 			return fmt.Errorf("Unable to install Salt: %s", err)
 		}
 	}
@@ -208,14 +305,14 @@ func (p *Provisioner) Provision(ui packer.Ui, comm packer.Communicator) error {
 		}
 
 		// move minion config into /etc/salt
-		ui.Message(fmt.Sprintf("Make sure directory %s exists", "/etc/salt"))
-		if err := p.createDir(ui, comm, "/etc/salt"); err != nil {
+		ui.Message(fmt.Sprintf("Make sure directory %s exists", p.guestOSTypeConfig.configDir))
+		if err := p.createDir(ui, comm, p.guestOSTypeConfig.configDir); err != nil {
 			return fmt.Errorf("Error creating remote salt configuration directory: %s", err)
 		}
 		src = filepath.ToSlash(filepath.Join(p.config.TempConfigDir, "minion"))
-		dst = "/etc/salt/minion"
+		dst = filepath.ToSlash(filepath.Join(p.guestOSTypeConfig.configDir, "minion"))
 		if err = p.moveFile(ui, comm, dst, src); err != nil {
-			return fmt.Errorf("Unable to move %s/minion to /etc/salt/minion: %s", p.config.TempConfigDir, err)
+			return fmt.Errorf("Unable to move %s/minion to %s/minion: %s", p.config.TempConfigDir, p.guestOSTypeConfig.configDir, err)
 		}
 	}
 
@@ -228,14 +325,14 @@ func (p *Provisioner) Provision(ui packer.Ui, comm packer.Communicator) error {
 		}
 
 		// move grains file into /etc/salt
-		ui.Message(fmt.Sprintf("Make sure directory %s exists", "/etc/salt"))
-		if err := p.createDir(ui, comm, "/etc/salt"); err != nil {
+		ui.Message(fmt.Sprintf("Make sure directory %s exists", p.guestOSTypeConfig.configDir))
+		if err := p.createDir(ui, comm, p.guestOSTypeConfig.configDir); err != nil {
 			return fmt.Errorf("Error creating remote salt configuration directory: %s", err)
 		}
 		src = filepath.ToSlash(filepath.Join(p.config.TempConfigDir, "grains"))
-		dst = "/etc/salt/grains"
+		dst = filepath.ToSlash(filepath.Join(p.guestOSTypeConfig.configDir, "grains"))
 		if err = p.moveFile(ui, comm, dst, src); err != nil {
-			return fmt.Errorf("Unable to move %s/grains to /etc/salt/grains: %s", p.config.TempConfigDir, err)
+			return fmt.Errorf("Unable to move %s/grains to %s/grains: %s", p.config.TempConfigDir, p.guestOSTypeConfig.configDir, err)
 		}
 	}
 
@@ -251,13 +348,27 @@ func (p *Provisioner) Provision(ui packer.Ui, comm packer.Communicator) error {
 	if p.config.RemoteStateTree != "" {
 		dst = p.config.RemoteStateTree
 	} else {
-		dst = DefaultStateTreeDir
+		dst = p.guestOSTypeConfig.stateRoot
 	}
-	if err = p.removeDir(ui, comm, dst); err != nil {
-		return fmt.Errorf("Unable to clear salt tree: %s", err)
+
+	if err = p.statPath(ui, comm, dst); err != nil {
+		if err = p.removeDir(ui, comm, dst); err != nil {
+			return fmt.Errorf("Unable to clear salt tree: %s", err)
+		}
 	}
+
 	if err = p.moveFile(ui, comm, dst, src); err != nil {
 		return fmt.Errorf("Unable to move %s/states to %s: %s", p.config.TempConfigDir, dst, err)
+	}
+
+	// Remove the local Salt formulas if present
+	if p.config.Formulas != nil {
+		for _, f := range formulas {
+			if _, err := os.Stat(f); !os.IsNotExist(err) && f != p.config.LocalStateTree {
+				ui.Message(fmt.Sprintf("Removing Salt formula: %s", f))
+				defer os.RemoveAll(f)
+			}
+		}
 	}
 
 	if p.config.LocalPillarRoots != "" {
@@ -273,21 +384,77 @@ func (p *Provisioner) Provision(ui packer.Ui, comm packer.Communicator) error {
 		if p.config.RemotePillarRoots != "" {
 			dst = p.config.RemotePillarRoots
 		} else {
-			dst = DefaultPillarRootDir
+			dst = p.guestOSTypeConfig.pillarRoot
 		}
-		if err = p.removeDir(ui, comm, dst); err != nil {
-			return fmt.Errorf("Unable to clear pillar root: %s", err)
+
+		if err = p.statPath(ui, comm, dst); err != nil {
+			if err = p.removeDir(ui, comm, dst); err != nil {
+				return fmt.Errorf("Unable to clear pillar root: %s", err)
+			}
 		}
+
 		if err = p.moveFile(ui, comm, dst, src); err != nil {
 			return fmt.Errorf("Unable to move %s/pillar to %s: %s", p.config.TempConfigDir, dst, err)
 		}
 	}
 
+	if p.config.GuestOSType == guestexec.WindowsOSType {
+		ui.Message("Downloading Git for Windows")
+		cmd1 := &packersdk.RemoteCmd{Command: fmt.Sprintf("powershell [Net.ServicePointManager]::SecurityProtocol = [Net.SecurityProtocolType]::Tls12; Invoke-WebRequest -Uri https://github.com/git-for-windows/git/releases/download/v2.28.0.windows.1/Git-2.28.0-64-bit.exe -OutFile $env:TEMP/Git.exe")}
+		if err = cmd1.RunWithUi(ctx, comm, ui); (err != nil || cmd1.ExitStatus() != 0) && !p.config.NoExitOnFailure {
+			if err == nil {
+				err = fmt.Errorf("Bad exit status: %d", cmd1.ExitStatus())
+			}
+
+			return fmt.Errorf("Unable to Download Git for Windows: %s", err)
+		}
+
+		ui.Message("Installing Git for Windows")
+		cmd2 := &packersdk.RemoteCmd{Command: fmt.Sprintf("powershell Start-Process -FilePath $env:TEMP/Git.exe /SILENT -Wait")}
+		if err = cmd2.RunWithUi(ctx, comm, ui); (err != nil || cmd2.ExitStatus() != 0) && !p.config.NoExitOnFailure {
+			if err == nil {
+				err = fmt.Errorf("Bad exit status: %d", cmd2.ExitStatus())
+			}
+
+			return fmt.Errorf("Unable to Install Git for Windows: %s", err)
+		}
+
+		ui.Message("Cleaning Up After Git for Windows")
+		cmd3 := &packersdk.RemoteCmd{Command: fmt.Sprintf("powershell Remove-Item $env:TEMP/Git.exe")}
+		if err = cmd3.RunWithUi(ctx, comm, ui); (err != nil || cmd3.ExitStatus() != 0) && !p.config.NoExitOnFailure {
+			if err == nil {
+				err = fmt.Errorf("Bad exit status: %d", cmd3.ExitStatus())
+			}
+
+			return fmt.Errorf("Unable to Clean-up After Git for Windows: %s", err)
+		}
+
+		ui.Message("Running salt-call --local winrepo.update_git_repos")
+		cmd4 := &packersdk.RemoteCmd{Command: fmt.Sprintf("%s --local winrepo.update_git_repos", filepath.Join(p.config.SaltBinDir, "salt-call"))}
+		if err = cmd4.RunWithUi(ctx, comm, ui); (err != nil || cmd4.ExitStatus() != 0) && !p.config.NoExitOnFailure {
+			if err == nil {
+				err = fmt.Errorf("Bad exit status: %d", cmd4.ExitStatus())
+			}
+
+			return fmt.Errorf("Error executing salt-call --local winrepo.update_git_repos: %s", err)
+		}
+
+		ui.Message("Running salt-call --local pkg.refresh_db")
+		cmd5 := &packersdk.RemoteCmd{Command: fmt.Sprintf("%s --local pkg.refresh_db", filepath.Join(p.config.SaltBinDir, "salt-call"))}
+		if err = cmd5.RunWithUi(ctx, comm, ui); (err != nil || cmd5.ExitStatus() != 0) && !p.config.NoExitOnFailure {
+			if err == nil {
+				err = fmt.Errorf("Bad exit status: %d", cmd5.ExitStatus())
+			}
+
+			return fmt.Errorf("Error executing salt-call --local pkg.refresh_db: %s", err)
+		}
+	}
+
 	ui.Message(fmt.Sprintf("Running: salt-call --local %s", p.config.CmdArgs))
-	cmd := &packer.RemoteCmd{Command: p.sudo(fmt.Sprintf("%s --local %s", filepath.Join(p.config.SaltBinDir, "salt-call"), p.config.CmdArgs))}
-	if err = cmd.StartWithUi(comm, ui); err != nil || cmd.ExitStatus != 0 {
+	cmd := &packersdk.RemoteCmd{Command: p.sudo(fmt.Sprintf("%s --local %s", filepath.Join(p.config.SaltBinDir, "salt-call"), p.config.CmdArgs))}
+	if err = cmd.RunWithUi(ctx, comm, ui); (err != nil || cmd.ExitStatus() != 0) && !p.config.NoExitOnFailure {
 		if err == nil {
-			err = fmt.Errorf("Bad exit status: %d", cmd.ExitStatus)
+			err = fmt.Errorf("Bad exit status: %d", cmd.ExitStatus())
 		}
 
 		return fmt.Errorf("Error executing salt-call: %s", err)
@@ -296,15 +463,9 @@ func (p *Provisioner) Provision(ui packer.Ui, comm packer.Communicator) error {
 	return nil
 }
 
-func (p *Provisioner) Cancel() {
-	// Just hard quit. It isn't a big deal if what we're doing keeps
-	// running on the other side.
-	os.Exit(0)
-}
-
 // Prepends sudo to supplied command if config says to
 func (p *Provisioner) sudo(cmd string) string {
-	if p.config.DisableSudo {
+	if p.config.DisableSudo || (p.config.GuestOSType == guestexec.WindowsOSType) {
 		return cmd
 	}
 
@@ -341,25 +502,49 @@ func validateFileConfig(path string, name string, required bool) error {
 	return nil
 }
 
-func (p *Provisioner) uploadFile(ui packer.Ui, comm packer.Communicator, dst, src string) error {
+func hasValidFormulaURLs(s []string) bool {
+	re := regexp.MustCompile(`^(.*).git\/\/[a-zA-Z0-9-_]+(\?.*)?$`)
+
+	for _, u := range s {
+		if !re.MatchString(u) {
+			return false
+		}
+	}
+
+	return true
+}
+
+func (p *Provisioner) uploadFile(ui packersdk.Ui, comm packersdk.Communicator, dst, src string) error {
 	f, err := os.Open(src)
 	if err != nil {
 		return fmt.Errorf("Error opening: %s", err)
 	}
 	defer f.Close()
 
-	if err = comm.Upload(dst, f, nil); err != nil {
+	_, temp_dst := filepath.Split(dst)
+
+	if err = comm.Upload(temp_dst, f, nil); err != nil {
 		return fmt.Errorf("Error uploading %s: %s", src, err)
 	}
+
+	err = p.moveFile(ui, comm, dst, temp_dst)
+	if err != nil {
+		return fmt.Errorf("Error moving file to destination: %s", err)
+	}
+
 	return nil
 }
 
-func (p *Provisioner) moveFile(ui packer.Ui, comm packer.Communicator, dst, src string) error {
+func (p *Provisioner) moveFile(ui packersdk.Ui, comm packersdk.Communicator, dst string, src string) error {
+	ctx := context.TODO()
+
 	ui.Message(fmt.Sprintf("Moving %s to %s", src, dst))
-	cmd := &packer.RemoteCmd{Command: fmt.Sprintf(p.sudo("mv %s %s"), src, dst)}
-	if err := cmd.StartWithUi(comm, ui); err != nil || cmd.ExitStatus != 0 {
+	cmd := &packersdk.RemoteCmd{
+		Command: p.sudo(p.guestCommands.MovePath(src, dst)),
+	}
+	if err := cmd.RunWithUi(ctx, comm, ui); err != nil || cmd.ExitStatus() != 0 {
 		if err == nil {
-			err = fmt.Errorf("Bad exit status: %d", cmd.ExitStatus)
+			err = fmt.Errorf("Bad exit status: %d", cmd.ExitStatus())
 		}
 
 		return fmt.Errorf("Unable to move %s to %s: %s", src, dst, err)
@@ -367,43 +552,55 @@ func (p *Provisioner) moveFile(ui packer.Ui, comm packer.Communicator, dst, src 
 	return nil
 }
 
-func (p *Provisioner) createDir(ui packer.Ui, comm packer.Communicator, dir string) error {
+func (p *Provisioner) createDir(ui packersdk.Ui, comm packersdk.Communicator, dir string) error {
 	ui.Message(fmt.Sprintf("Creating directory: %s", dir))
-	cmd := &packer.RemoteCmd{
-		Command: fmt.Sprintf("mkdir -p '%s'", dir),
+	cmd := &packersdk.RemoteCmd{
+		Command: p.guestCommands.CreateDir(dir),
 	}
-	if err := cmd.StartWithUi(comm, ui); err != nil {
+	ctx := context.TODO()
+	if err := cmd.RunWithUi(ctx, comm, ui); err != nil {
 		return err
 	}
-	if cmd.ExitStatus != 0 {
+	if cmd.ExitStatus() != 0 {
 		return fmt.Errorf("Non-zero exit status.")
 	}
 	return nil
 }
 
-func (p *Provisioner) removeDir(ui packer.Ui, comm packer.Communicator, dir string) error {
+func (p *Provisioner) statPath(ui packersdk.Ui, comm packersdk.Communicator, path string) error {
+	ctx := context.TODO()
+	ui.Message(fmt.Sprintf("Verifying Path: %s", path))
+	cmd := &packersdk.RemoteCmd{
+		Command: p.guestCommands.StatPath(path),
+	}
+	if err := cmd.RunWithUi(ctx, comm, ui); err != nil {
+		return err
+	}
+	if cmd.ExitStatus() != 0 {
+		return fmt.Errorf("Non-zero exit status.")
+	}
+	return nil
+}
+
+func (p *Provisioner) removeDir(ui packersdk.Ui, comm packersdk.Communicator, dir string) error {
+	ctx := context.TODO()
 	ui.Message(fmt.Sprintf("Removing directory: %s", dir))
-	cmd := &packer.RemoteCmd{
-		Command: fmt.Sprintf(p.sudo("rm -rf '%s'"), dir),
+	cmd := &packersdk.RemoteCmd{
+		Command: p.guestCommands.RemoveDir(dir),
 	}
-	if err := cmd.StartWithUi(comm, ui); err != nil {
+	if err := cmd.RunWithUi(ctx, comm, ui); err != nil {
 		return err
 	}
-	if cmd.ExitStatus != 0 {
+	if cmd.ExitStatus() != 0 {
 		return fmt.Errorf("Non-zero exit status.")
 	}
 	return nil
 }
 
-func (p *Provisioner) uploadDir(ui packer.Ui, comm packer.Communicator, dst, src string, ignore []string) error {
-	if err := p.createDir(ui, comm, dst); err != nil {
+func (p *Provisioner) uploadDir(ui packersdk.Ui, comm packersdk.Communicator, dst, src string, ignore []string) error {
+	_, temp_dst := filepath.Split(dst)
+	if err := comm.UploadDir(temp_dst, src, ignore); err != nil {
 		return err
 	}
-
-	// Make sure there is a trailing "/" so that the directory isn't
-	// created on the other side.
-	if src[len(src)-1] != '/' {
-		src = src + "/"
-	}
-	return comm.UploadDir(dst, src, ignore)
+	return p.moveFile(ui, comm, dst, temp_dst)
 }

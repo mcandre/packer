@@ -1,72 +1,49 @@
+//go:generate mapstructure-to-hcl2 -type Config
+
 // This package implements a provisioner for Packer that executes
 // shell scripts within the remote machine.
 package shell
 
 import (
 	"bufio"
+	"context"
 	"errors"
 	"fmt"
-	"io/ioutil"
 	"log"
 	"os"
 	"sort"
 	"strings"
 	"time"
 
-	"github.com/hashicorp/packer/common"
-	"github.com/hashicorp/packer/helper/config"
-	"github.com/hashicorp/packer/packer"
-	"github.com/hashicorp/packer/template/interpolate"
+	"github.com/hashicorp/hcl/v2/hcldec"
+	"github.com/hashicorp/packer-plugin-sdk/multistep/commonsteps"
+	packersdk "github.com/hashicorp/packer-plugin-sdk/packer"
+	"github.com/hashicorp/packer-plugin-sdk/retry"
+	"github.com/hashicorp/packer-plugin-sdk/shell"
+	"github.com/hashicorp/packer-plugin-sdk/template/config"
+	"github.com/hashicorp/packer-plugin-sdk/template/interpolate"
+	"github.com/hashicorp/packer-plugin-sdk/tmp"
 )
 
+//FIXME query remote host or use %SYSTEMROOT%, %TEMP% and more creative filename
 const DefaultRemotePath = "c:/Windows/Temp/script.bat"
 
-var retryableSleep = 2 * time.Second
-
 type Config struct {
-	common.PackerConfig `mapstructure:",squash"`
+	shell.Provisioner `mapstructure:",squash"`
 
-	// If true, the script contains binary and line endings will not be
-	// converted from Windows to Unix-style.
-	Binary bool
-
-	// An inline script to execute. Multiple strings are all executed
-	// in the context of a single shell.
-	Inline []string
-
-	// The local path of the shell script to upload and execute.
-	Script string
-
-	// An array of multiple scripts to run.
-	Scripts []string
-
-	// An array of environment variables that will be injected before
-	// your command(s) are executed.
-	Vars []string `mapstructure:"environment_vars"`
-
-	// The remote path where the local shell script will be uploaded to.
-	// This should be set to a writable file that is in a pre-existing directory.
-	RemotePath string `mapstructure:"remote_path"`
-
-	// The command used to execute the script. The '{{ .Path }}' variable
-	// should be used to specify where the script goes, {{ .Vars }}
-	// can be used to inject the environment_vars into the environment.
-	ExecuteCommand string `mapstructure:"execute_command"`
+	shell.ProvisionerRemoteSpecific `mapstructure:",squash"`
 
 	// The timeout for retrying to start the process. Until this timeout
 	// is reached, if the provisioner can't start a process, it retries.
 	// This can be set high to allow for reboots.
 	StartRetryTimeout time.Duration `mapstructure:"start_retry_timeout"`
 
-	// This is used in the template generation to format environment variables
-	// inside the `ExecuteCommand` template.
-	EnvVarFormat string
-
 	ctx interpolate.Context
 }
 
 type Provisioner struct {
-	config Config
+	config        Config
+	generatedData map[string]interface{}
 }
 
 type ExecuteCommandTemplate struct {
@@ -74,8 +51,11 @@ type ExecuteCommandTemplate struct {
 	Path string
 }
 
+func (p *Provisioner) ConfigSpec() hcldec.ObjectSpec { return p.config.FlatMapstructure().HCL2Spec() }
+
 func (p *Provisioner) Prepare(raws ...interface{}) error {
 	err := config.Decode(&p.config, &config.DecodeOpts{
+		PluginType:         "windows-shell",
 		Interpolate:        true,
 		InterpolateContext: &p.config.ctx,
 		InterpolateFilter: &interpolate.RenderFilter{
@@ -118,7 +98,7 @@ func (p *Provisioner) Prepare(raws ...interface{}) error {
 
 	var errs error
 	if p.config.Script != "" && len(p.config.Scripts) > 0 {
-		errs = packer.MultiErrorAppend(errs,
+		errs = packersdk.MultiErrorAppend(errs,
 			errors.New("Only one of script or scripts can be specified."))
 	}
 
@@ -127,16 +107,16 @@ func (p *Provisioner) Prepare(raws ...interface{}) error {
 	}
 
 	if len(p.config.Scripts) == 0 && p.config.Inline == nil {
-		errs = packer.MultiErrorAppend(errs,
+		errs = packersdk.MultiErrorAppend(errs,
 			errors.New("Either a script file or inline script must be specified."))
 	} else if len(p.config.Scripts) > 0 && p.config.Inline != nil {
-		errs = packer.MultiErrorAppend(errs,
+		errs = packersdk.MultiErrorAppend(errs,
 			errors.New("Only a script file or an inline script can be specified, not both."))
 	}
 
 	for _, path := range p.config.Scripts {
 		if _, err := os.Stat(path); err != nil {
-			errs = packer.MultiErrorAppend(errs,
+			errs = packersdk.MultiErrorAppend(errs,
 				fmt.Errorf("Bad script '%s': %s", path, err))
 		}
 	}
@@ -145,7 +125,7 @@ func (p *Provisioner) Prepare(raws ...interface{}) error {
 	for _, kv := range p.config.Vars {
 		vs := strings.SplitN(kv, "=", 2)
 		if len(vs) != 2 || vs[0] == "" {
-			errs = packer.MultiErrorAppend(errs,
+			errs = packersdk.MultiErrorAppend(errs,
 				fmt.Errorf("Environment variable not in format 'key=value': %s", kv))
 		}
 	}
@@ -157,7 +137,7 @@ func (p *Provisioner) Prepare(raws ...interface{}) error {
 // into a temporary file and returns a string containing the location
 // of said file.
 func extractScript(p *Provisioner) (string, error) {
-	temp, err := ioutil.TempFile(os.TempDir(), "packer-windows-shell-provisioner")
+	temp, err := tmp.File("windows-shell-provisioner")
 	if err != nil {
 		log.Printf("Unable to create temporary file for inline scripts: %s", err)
 		return "", err
@@ -179,10 +159,11 @@ func extractScript(p *Provisioner) (string, error) {
 	return temp.Name(), nil
 }
 
-func (p *Provisioner) Provision(ui packer.Ui, comm packer.Communicator) error {
-	ui.Say(fmt.Sprintf("Provisioning with windows-shell..."))
+func (p *Provisioner) Provision(ctx context.Context, ui packersdk.Ui, comm packersdk.Communicator, generatedData map[string]interface{}) error {
+	ui.Say("Provisioning with windows-shell...")
 	scripts := make([]string, len(p.config.Scripts))
 	copy(scripts, p.config.Scripts)
+	p.generatedData = generatedData
 
 	if p.config.Inline != nil {
 		temp, err := extractScript(p)
@@ -190,6 +171,8 @@ func (p *Provisioner) Provision(ui packer.Ui, comm packer.Communicator) error {
 			ui.Error(fmt.Sprintf("Unable to extract inline scripts into a file: %s", err))
 		}
 		scripts = append(scripts, temp)
+		// Remove temp script containing the inline commands when done
+		defer os.Remove(temp)
 	}
 
 	for _, path := range scripts {
@@ -203,11 +186,11 @@ func (p *Provisioner) Provision(ui packer.Ui, comm packer.Communicator) error {
 		defer f.Close()
 
 		// Create environment variables to set before executing the command
-		flattendVars := p.createFlattenedEnvVars()
+		flattenedVars := p.createFlattenedEnvVars()
 
 		// Compile the command
 		p.config.ctx.Data = &ExecuteCommandTemplate{
-			Vars: flattendVars,
+			Vars: flattenedVars,
 			Path: p.config.RemotePath,
 		}
 		command, err := interpolate.Render(p.config.ExecuteCommand, &p.config.ctx)
@@ -220,8 +203,8 @@ func (p *Provisioner) Provision(ui packer.Ui, comm packer.Communicator) error {
 		// the case that the upload succeeded, a restart is initiated,
 		// and then the command is executed but the file doesn't exist
 		// any longer.
-		var cmd *packer.RemoteCmd
-		err = p.retryable(func() error {
+		var cmd *packersdk.RemoteCmd
+		err = retry.Config{StartTimeout: p.config.StartRetryTimeout}.Run(ctx, func(ctx context.Context) error {
 			if _, err := f.Seek(0, 0); err != nil {
 				return err
 			}
@@ -230,8 +213,8 @@ func (p *Provisioner) Provision(ui packer.Ui, comm packer.Communicator) error {
 				return fmt.Errorf("Error uploading script: %s", err)
 			}
 
-			cmd = &packer.RemoteCmd{Command: command}
-			return cmd.StartWithUi(comm, ui)
+			cmd = &packersdk.RemoteCmd{Command: command}
+			return cmd.RunWithUi(ctx, comm, ui)
 		})
 		if err != nil {
 			return err
@@ -240,44 +223,12 @@ func (p *Provisioner) Provision(ui packer.Ui, comm packer.Communicator) error {
 		// Close the original file since we copied it
 		f.Close()
 
-		if cmd.ExitStatus != 0 {
-			return fmt.Errorf("Script exited with non-zero exit status: %d", cmd.ExitStatus)
+		if err := p.config.ValidExitCode(cmd.ExitStatus()); err != nil {
+			return err
 		}
 	}
 
 	return nil
-}
-
-func (p *Provisioner) Cancel() {
-	// Just hard quit. It isn't a big deal if what we're doing keeps
-	// running on the other side.
-	os.Exit(0)
-}
-
-// retryable will retry the given function over and over until a
-// non-error is returned.
-func (p *Provisioner) retryable(f func() error) error {
-	startTimeout := time.After(p.config.StartRetryTimeout)
-	for {
-		var err error
-		if err = f(); err == nil {
-			return nil
-		}
-
-		// Create an error and log it
-		err = fmt.Errorf("Retryable error: %s", err)
-		log.Print(err.Error())
-
-		// Check if we timed out, otherwise we retry. It is safe to
-		// retry since the only error case above is if the command
-		// failed to START.
-		select {
-		case <-startTimeout:
-			return err
-		default:
-			time.Sleep(retryableSleep)
-		}
-	}
 }
 
 func (p *Provisioner) createFlattenedEnvVars() (flattened string) {
@@ -287,9 +238,19 @@ func (p *Provisioner) createFlattenedEnvVars() (flattened string) {
 	// Always available Packer provided env vars
 	envVars["PACKER_BUILD_NAME"] = p.config.PackerBuildName
 	envVars["PACKER_BUILDER_TYPE"] = p.config.PackerBuilderType
-	httpAddr := common.GetHTTPAddr()
-	if httpAddr != "" {
-		envVars["PACKER_HTTP_ADDR"] = httpAddr
+
+	// expose ip address variables
+	httpAddr := p.generatedData["PackerHTTPAddr"]
+	if httpAddr != nil && httpAddr != commonsteps.HttpAddrNotImplemented {
+		envVars["PACKER_HTTP_ADDR"] = httpAddr.(string)
+	}
+	httpIP := p.generatedData["PackerHTTPIP"]
+	if httpIP != nil && httpIP != commonsteps.HttpIPNotImplemented {
+		envVars["PACKER_HTTP_IP"] = httpIP.(string)
+	}
+	httpPort := p.generatedData["PackerHTTPPort"]
+	if httpPort != nil && httpPort != commonsteps.HttpPortNotImplemented {
+		envVars["PACKER_HTTP_PORT"] = httpPort.(string)
 	}
 
 	// Split vars into key/value components

@@ -5,19 +5,19 @@ import (
 	"fmt"
 	"strings"
 
-	"github.com/hashicorp/packer/helper/multistep"
-	"github.com/hashicorp/packer/packer"
+	"github.com/hashicorp/packer-plugin-sdk/multistep"
+	packersdk "github.com/hashicorp/packer-plugin-sdk/packer"
 )
 
 type stepReleaseVersion struct {
 }
 
-func (s *stepReleaseVersion) Run(_ context.Context, state multistep.StateBag) multistep.StepAction {
+func (s *stepReleaseVersion) Run(ctx context.Context, state multistep.StateBag) multistep.StepAction {
 	client := state.Get("client").(*VagrantCloudClient)
-	ui := state.Get("ui").(packer.Ui)
+	ui := state.Get("ui").(packersdk.Ui)
 	box := state.Get("box").(*Box)
 	version := state.Get("version").(*Version)
-	config := state.Get("config").(Config)
+	config := state.Get("config").(*Config)
 
 	ui.Say(fmt.Sprintf("Releasing version: %s", version.Version))
 

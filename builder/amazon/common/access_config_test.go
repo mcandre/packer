@@ -5,44 +5,41 @@ import (
 
 	"github.com/aws/aws-sdk-go/aws"
 	"github.com/aws/aws-sdk-go/aws/session"
+	"github.com/aws/aws-sdk-go/service/ec2/ec2iface"
 )
 
 func testAccessConfig() *AccessConfig {
-	return &AccessConfig{}
+	return &AccessConfig{
+		getEC2Connection: func() ec2iface.EC2API {
+			return &mockEC2Client{}
+		},
+		PollingConfig: new(AWSPollingConfig),
+	}
 }
 
 func TestAccessConfigPrepare_Region(t *testing.T) {
 	c := testAccessConfig()
-	c.RawRegion = ""
-	if err := c.Prepare(nil); err != nil {
-		t.Fatalf("shouldn't have err: %s", err)
-	}
 
 	c.RawRegion = "us-east-12"
-	if err := c.Prepare(nil); err == nil {
-		t.Fatal("should have error")
+	err := c.ValidateRegion(c.RawRegion)
+	if err == nil {
+		t.Fatalf("should have region validation err: %s", c.RawRegion)
 	}
 
 	c.RawRegion = "us-east-1"
-	if err := c.Prepare(nil); err != nil {
-		t.Fatalf("shouldn't have err: %s", err)
+	err = c.ValidateRegion(c.RawRegion)
+	if err != nil {
+		t.Fatalf("shouldn't have region validation err: %s", c.RawRegion)
 	}
 
 	c.RawRegion = "custom"
-	if err := c.Prepare(nil); err == nil {
-		t.Fatalf("should have err")
+	err = c.ValidateRegion(c.RawRegion)
+	if err == nil {
+		t.Fatalf("should have region validation err: %s", c.RawRegion)
 	}
-
-	c.RawRegion = "custom"
-	c.SkipValidation = true
-	if err := c.Prepare(nil); err != nil {
-		t.Fatalf("shouldn't have err: %s", err)
-	}
-	c.SkipValidation = false
-
 }
 
-func TestAccessConfigPrepare_RegionRestrictd(t *testing.T) {
+func TestAccessConfigPrepare_RegionRestricted(t *testing.T) {
 	c := testAccessConfig()
 
 	// Create a Session with a custom region

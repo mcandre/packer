@@ -9,6 +9,7 @@ import (
 type ListOpts struct {
 	// Marker is the ID of the last Tenant on the previous page.
 	Marker string `q:"marker"`
+
 	// Limit specifies the page size.
 	Limit int `q:"limit"`
 }
@@ -32,18 +33,22 @@ func List(client *gophercloud.ServiceClient, opts *ListOpts) pagination.Pager {
 type CreateOpts struct {
 	// Name is the name of the tenant.
 	Name string `json:"name" required:"true"`
+
 	// Description is the description of the tenant.
 	Description string `json:"description,omitempty"`
+
 	// Enabled sets the tenant status to enabled or disabled.
 	Enabled *bool `json:"enabled,omitempty"`
 }
 
-// CreateOptsBuilder describes struct types that can be accepted by the Create call.
+// CreateOptsBuilder enables extensions to add additional parameters to the
+// Create request.
 type CreateOptsBuilder interface {
 	ToTenantCreateMap() (map[string]interface{}, error)
 }
 
-// ToTenantCreateMap assembles a request body based on the contents of a CreateOpts.
+// ToTenantCreateMap assembles a request body based on the contents of
+// a CreateOpts.
 func (opts CreateOpts) ToTenantCreateMap() (map[string]interface{}, error) {
 	return gophercloud.BuildRequestBody(opts, "tenant")
 }
@@ -55,29 +60,35 @@ func Create(client *gophercloud.ServiceClient, opts CreateOptsBuilder) (r Create
 		r.Err = err
 		return
 	}
-	_, r.Err = client.Post(createURL(client), b, &r.Body, &gophercloud.RequestOpts{
+	resp, err := client.Post(createURL(client), b, &r.Body, &gophercloud.RequestOpts{
 		OkCodes: []int{200, 201},
 	})
+	_, r.Header, r.Err = gophercloud.ParseResponse(resp, err)
 	return
 }
 
 // Get requests details on a single tenant by ID.
 func Get(client *gophercloud.ServiceClient, id string) (r GetResult) {
-	_, r.Err = client.Get(getURL(client, id), &r.Body, nil)
+	resp, err := client.Get(getURL(client, id), &r.Body, nil)
+	_, r.Header, r.Err = gophercloud.ParseResponse(resp, err)
 	return
 }
 
-// UpdateOptsBuilder allows extensions to add additional attributes to the Update request.
+// UpdateOptsBuilder allows extensions to add additional parameters to the
+// Update request.
 type UpdateOptsBuilder interface {
 	ToTenantUpdateMap() (map[string]interface{}, error)
 }
 
-// UpdateOpts specifies the base attributes that may be updated on an existing server.
+// UpdateOpts specifies the base attributes that may be updated on an existing
+// tenant.
 type UpdateOpts struct {
 	// Name is the name of the tenant.
 	Name string `json:"name,omitempty"`
+
 	// Description is the description of the tenant.
-	Description string `json:"description,omitempty"`
+	Description *string `json:"description,omitempty"`
+
 	// Enabled sets the tenant status to enabled or disabled.
 	Enabled *bool `json:"enabled,omitempty"`
 }
@@ -94,14 +105,16 @@ func Update(client *gophercloud.ServiceClient, id string, opts UpdateOptsBuilder
 		r.Err = err
 		return
 	}
-	_, r.Err = client.Put(updateURL(client, id), &b, &r.Body, &gophercloud.RequestOpts{
+	resp, err := client.Put(updateURL(client, id), &b, &r.Body, &gophercloud.RequestOpts{
 		OkCodes: []int{200},
 	})
+	_, r.Header, r.Err = gophercloud.ParseResponse(resp, err)
 	return
 }
 
-// Delete is the operation responsible for permanently deleting an API tenant.
+// Delete is the operation responsible for permanently deleting a tenant.
 func Delete(client *gophercloud.ServiceClient, id string) (r DeleteResult) {
-	_, r.Err = client.Delete(deleteURL(client, id), nil)
+	resp, err := client.Delete(deleteURL(client, id), nil)
+	_, r.Header, r.Err = gophercloud.ParseResponse(resp, err)
 	return
 }

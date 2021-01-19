@@ -5,7 +5,7 @@ import (
 	"fmt"
 	"os"
 
-	"github.com/hashicorp/packer/helper/multistep"
+	"github.com/hashicorp/packer-plugin-sdk/multistep"
 )
 
 // StepPrepareParallelsTools is a step that prepares parameters related
@@ -22,7 +22,7 @@ type StepPrepareParallelsTools struct {
 }
 
 // Run sets the value of "parallels_tools_path".
-func (s *StepPrepareParallelsTools) Run(_ context.Context, state multistep.StateBag) multistep.StepAction {
+func (s *StepPrepareParallelsTools) Run(ctx context.Context, state multistep.StateBag) multistep.StepAction {
 	driver := state.Get("driver").(Driver)
 
 	if s.ParallelsToolsMode == ParallelsToolsModeDisable {

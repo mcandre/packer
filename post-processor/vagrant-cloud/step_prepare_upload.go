@@ -4,26 +4,31 @@ import (
 	"context"
 	"fmt"
 
-	"github.com/hashicorp/packer/helper/multistep"
-	"github.com/hashicorp/packer/packer"
+	"github.com/hashicorp/packer-plugin-sdk/multistep"
+	packersdk "github.com/hashicorp/packer-plugin-sdk/packer"
 )
 
 type Upload struct {
-	UploadPath string `json:"upload_path"`
+	UploadPath   string `json:"upload_path"`
+	CallbackPath string `json:"callback"`
 }
 
 type stepPrepareUpload struct {
 }
 
-func (s *stepPrepareUpload) Run(_ context.Context, state multistep.StateBag) multistep.StepAction {
+func (s *stepPrepareUpload) Run(ctx context.Context, state multistep.StateBag) multistep.StepAction {
 	client := state.Get("client").(*VagrantCloudClient)
-	ui := state.Get("ui").(packer.Ui)
+	config := state.Get("config").(*Config)
+	ui := state.Get("ui").(packersdk.Ui)
 	box := state.Get("box").(*Box)
 	version := state.Get("version").(*Version)
 	provider := state.Get("provider").(*Provider)
 	artifactFilePath := state.Get("artifactFilePath").(string)
 
 	path := fmt.Sprintf("box/%s/version/%v/provider/%s/upload", box.Tag, version.Version, provider.Name)
+	if !config.NoDirectUpload {
+		path = path + "/direct"
+	}
 	upload := &Upload{}
 
 	ui.Say(fmt.Sprintf("Preparing upload of box: %s", artifactFilePath))
@@ -36,6 +41,9 @@ func (s *stepPrepareUpload) Run(_ context.Context, state multistep.StateBag) mul
 		} else {
 			cloudErrors := &VagrantCloudErrors{}
 			err = decodeBody(resp, cloudErrors)
+			if err != nil {
+				ui.Error(fmt.Sprintf("error decoding error response: %s", err))
+			}
 			state.Put("error", fmt.Errorf("Error preparing upload: %s", cloudErrors.FormatErrors()))
 		}
 		return multistep.ActionHalt

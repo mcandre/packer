@@ -1,18 +1,19 @@
-// The scaleway package contains a packer.Builder implementation
+// The scaleway package contains a packersdk.Builder implementation
 // that builds Scaleway images (snapshots).
 
 package scaleway
 
 import (
+	"context"
 	"errors"
 	"fmt"
-	"log"
 
-	"github.com/hashicorp/packer/common"
-	"github.com/hashicorp/packer/helper/communicator"
-	"github.com/hashicorp/packer/helper/multistep"
-	"github.com/hashicorp/packer/packer"
-	"github.com/scaleway/scaleway-cli/pkg/api"
+	"github.com/hashicorp/hcl/v2/hcldec"
+	"github.com/hashicorp/packer-plugin-sdk/communicator"
+	"github.com/hashicorp/packer-plugin-sdk/multistep"
+	"github.com/hashicorp/packer-plugin-sdk/multistep/commonsteps"
+	packersdk "github.com/hashicorp/packer-plugin-sdk/packer"
+	"github.com/scaleway/scaleway-sdk-go/scw"
 )
 
 // The unique id for the builder
@@ -23,51 +24,75 @@ type Builder struct {
 	runner multistep.Runner
 }
 
-func (b *Builder) Prepare(raws ...interface{}) ([]string, error) {
-	c, warnings, errs := NewConfig(raws...)
-	if errs != nil {
-		return warnings, errs
-	}
-	b.config = *c
+func (b *Builder) ConfigSpec() hcldec.ObjectSpec { return b.config.FlatMapstructure().HCL2Spec() }
 
-	return nil, nil
+func (b *Builder) Prepare(raws ...interface{}) ([]string, []string, error) {
+	warnings, errs := b.config.Prepare(raws...)
+	if errs != nil {
+		return nil, warnings, errs
+	}
+
+	return nil, warnings, nil
 }
 
-func (b *Builder) Run(ui packer.Ui, hook packer.Hook, cache packer.Cache) (packer.Artifact, error) {
-	client, err := api.NewScalewayAPI(b.config.Organization, b.config.Token, b.config.UserAgent, b.config.Region)
+func (b *Builder) Run(ctx context.Context, ui packersdk.Ui, hook packersdk.Hook) (packersdk.Artifact, error) {
+	scwZone, err := scw.ParseZone(b.config.Zone)
+	if err != nil {
+		ui.Error(err.Error())
+		return nil, err
+	}
 
+	clientOpts := []scw.ClientOption{
+		scw.WithDefaultProjectID(b.config.ProjectID),
+		scw.WithAuth(b.config.AccessKey, b.config.SecretKey),
+		scw.WithDefaultZone(scwZone),
+	}
+
+	if b.config.APIURL != "" {
+		clientOpts = append(clientOpts, scw.WithAPIURL(b.config.APIURL))
+	}
+
+	client, err := scw.NewClient(clientOpts...)
 	if err != nil {
 		ui.Error(err.Error())
 		return nil, err
 	}
 
 	state := new(multistep.BasicStateBag)
-	state.Put("config", b.config)
+	state.Put("config", &b.config)
 	state.Put("client", client)
 	state.Put("hook", hook)
 	state.Put("ui", ui)
 
 	steps := []multistep.Step{
-		&stepCreateSSHKey{
-			Debug:          b.config.PackerDebug,
-			DebugKeyPath:   fmt.Sprintf("scw_%s.pem", b.config.PackerBuildName),
-			PrivateKeyFile: b.config.Comm.SSHPrivateKey,
+		&stepPreValidate{
+			Force:        b.config.PackerForce,
+			ImageName:    b.config.ImageName,
+			SnapshotName: b.config.SnapshotName,
 		},
+		&stepCreateSSHKey{
+			Debug:        b.config.PackerDebug,
+			DebugKeyPath: fmt.Sprintf("scw_%s.pem", b.config.PackerBuildName),
+		},
+		new(stepRemoveVolume),
 		new(stepCreateServer),
 		new(stepServerInfo),
 		&communicator.StepConnect{
 			Config:    &b.config.Comm,
-			Host:      commHost,
-			SSHConfig: sshConfig,
+			Host:      communicator.CommHost(b.config.Comm.Host(), "server_ip"),
+			SSHConfig: b.config.Comm.SSHConfigFunc(),
 		},
-		new(common.StepProvision),
+		new(commonsteps.StepProvision),
+		&commonsteps.StepCleanupTempKeys{
+			Comm: &b.config.Comm,
+		},
 		new(stepShutdown),
 		new(stepSnapshot),
 		new(stepImage),
 	}
 
-	b.runner = common.NewRunnerWithPauseFn(steps, b.config.PackerConfig, ui, state)
-	b.runner.Run(state)
+	b.runner = commonsteps.NewRunnerWithPauseFn(steps, b.config.PackerConfig, ui, state)
+	b.runner.Run(ctx, state)
 
 	if rawErr, ok := state.GetOk("error"); ok {
 		return nil, rawErr.(error)
@@ -91,16 +116,10 @@ func (b *Builder) Run(ui packer.Ui, hook packer.Hook, cache packer.Cache) (packe
 		imageID:      state.Get("image_id").(string),
 		snapshotName: state.Get("snapshot_name").(string),
 		snapshotID:   state.Get("snapshot_id").(string),
-		regionName:   state.Get("region").(string),
+		zoneName:     b.config.Zone,
 		client:       client,
+		StateData:    map[string]interface{}{"generated_data": state.Get("generated_data")},
 	}
 
 	return artifact, nil
-}
-
-func (b *Builder) Cancel() {
-	if b.runner != nil {
-		log.Println("Cancelling the step runner...")
-		b.runner.Cancel()
-	}
 }

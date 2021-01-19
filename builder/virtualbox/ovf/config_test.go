@@ -6,7 +6,7 @@ import (
 	"os"
 	"testing"
 
-	"github.com/hashicorp/packer/packer"
+	packersdk "github.com/hashicorp/packer-plugin-sdk/packer"
 )
 
 func testConfig(t *testing.T) map[string]interface{} {
@@ -31,33 +31,36 @@ func getTempFile(t *testing.T) *os.File {
 }
 
 func TestNewConfig_FloppyFiles(t *testing.T) {
-	c := testConfig(t)
-	floppies_path := "../../../common/test-fixtures/floppies"
-	c["floppy_files"] = []string{fmt.Sprintf("%s/bar.bat", floppies_path), fmt.Sprintf("%s/foo.ps1", floppies_path)}
-	_, _, err := NewConfig(c)
+	cfg := testConfig(t)
+	floppies_path := "../../test-fixtures/floppies"
+	cfg["floppy_files"] = []string{fmt.Sprintf("%s/bar.bat", floppies_path), fmt.Sprintf("%s/foo.ps1", floppies_path)}
+	var c Config
+	_, err := c.Prepare(cfg)
 	if err != nil {
 		t.Fatalf("should not have error: %s", err)
 	}
 }
 
 func TestNewConfig_InvalidFloppies(t *testing.T) {
-	c := testConfig(t)
-	c["floppy_files"] = []string{"nonexistent.bat", "nonexistent.ps1"}
-	_, _, errs := NewConfig(c)
+	cfg := testConfig(t)
+	cfg["floppy_files"] = []string{"nonexistent.bat", "nonexistent.ps1"}
+	var c Config
+	_, errs := c.Prepare(cfg)
 	if errs == nil {
 		t.Fatalf("Nonexistent floppies should trigger multierror")
 	}
 
-	if len(errs.(*packer.MultiError).Errors) != 2 {
+	if len(errs.(*packersdk.MultiError).Errors) != 2 {
 		t.Fatalf("Multierror should work and report 2 errors")
 	}
 }
 
 func TestNewConfig_sourcePath(t *testing.T) {
 	// Okay, because it gets caught during download
-	c := testConfig(t)
-	delete(c, "source_path")
-	_, warns, err := NewConfig(c)
+	cfg := testConfig(t)
+	delete(cfg, "source_path")
+	var c Config
+	warns, err := c.Prepare(cfg)
 	if len(warns) > 0 {
 		t.Fatalf("bad: %#v", warns)
 	}
@@ -65,35 +68,13 @@ func TestNewConfig_sourcePath(t *testing.T) {
 		t.Fatalf("should error with empty `source_path`")
 	}
 
-	// Want this to fail on validation
-	c = testConfig(t)
-	c["source_path"] = "/i/dont/exist"
-	_, warns, err = NewConfig(c)
-	if len(warns) > 0 {
-		t.Fatalf("bad: %#v", warns)
-	}
-	if err == nil {
-		t.Fatalf("Nonexistant file should throw a validation error!")
-	}
-
-	// Bad
-	c = testConfig(t)
-	c["source_path"] = "ftp://i/dont/exist"
-	_, warns, err = NewConfig(c)
-	if len(warns) > 0 {
-		t.Fatalf("bad: %#v", warns)
-	}
-	if err == nil {
-		t.Fatalf("should error")
-	}
-
 	// Good
 	tf := getTempFile(t)
 	defer os.Remove(tf.Name())
 
-	c = testConfig(t)
-	c["source_path"] = tf.Name()
-	_, warns, err = NewConfig(c)
+	cfg = testConfig(t)
+	cfg["source_path"] = tf.Name()
+	warns, err = c.Prepare(cfg)
 	if len(warns) > 0 {
 		t.Fatalf("bad: %#v", warns)
 	}
@@ -103,14 +84,15 @@ func TestNewConfig_sourcePath(t *testing.T) {
 }
 
 func TestNewConfig_shutdown_timeout(t *testing.T) {
-	c := testConfig(t)
+	cfg := testConfig(t)
 	tf := getTempFile(t)
 	defer os.Remove(tf.Name())
 
 	// Expect this to fail
-	c["source_path"] = tf.Name()
-	c["shutdown_timeout"] = "NaN"
-	_, warns, err := NewConfig(c)
+	cfg["source_path"] = tf.Name()
+	cfg["shutdown_timeout"] = "NaN"
+	var c Config
+	warns, err := c.Prepare(cfg)
 	if len(warns) > 0 {
 		t.Fatalf("bad: %#v", warns)
 	}
@@ -119,12 +101,48 @@ func TestNewConfig_shutdown_timeout(t *testing.T) {
 	}
 
 	// Passes when given a valid time duration
-	c["shutdown_timeout"] = "10s"
-	_, warns, err = NewConfig(c)
+	cfg["shutdown_timeout"] = "10s"
+	warns, err = c.Prepare(cfg)
 	if len(warns) > 0 {
 		t.Fatalf("bad: %#v", warns)
 	}
 	if err != nil {
 		t.Fatalf("bad: %s", err)
+	}
+}
+
+// TestChecksumFileNameMixedCaseBug reproduces Github issue #9049:
+//	https://github.com/hashicorp/packer/issues/9049
+func TestChecksumFileNameMixedCaseBug(t *testing.T) {
+	tt := []struct {
+		Name         string
+		ChecksumPath string
+	}{
+		{"Lowercase", "file:/tmp/random/file.md5"},
+		{"MiXeDcAsE", "file:/tmp/RaNdOm/FiLe.Md5"},
+	}
+
+	for _, tc := range tt {
+
+		cfg := testConfig(t)
+		cfg["source_path"] = "bug.ovf"
+		cfg["checksum"] = tc.ChecksumPath
+		cfg["type"] = "virtualbox-ovf"
+		cfg["guest_additions_mode"] = "disable"
+		cfg["headless"] = false
+
+		var c Config
+		warns, err := c.Prepare(cfg)
+		if err != nil {
+			t.Errorf("config failed to Prepare, %s", err.Error())
+		}
+
+		if len(warns) != 0 {
+			t.Errorf("Encountered warnings during config preparation: %s", warns)
+		}
+
+		if c.Checksum != tc.ChecksumPath {
+			t.Errorf("%s test failed, Checksum and ChecksumPath are expected to be equal, expected: %s, got: %s", tc.Name, tc.ChecksumPath, c.Checksum)
+		}
 	}
 }

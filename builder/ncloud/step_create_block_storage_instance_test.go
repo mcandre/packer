@@ -5,16 +5,16 @@ import (
 	"fmt"
 	"testing"
 
-	"github.com/hashicorp/packer/helper/multistep"
+	"github.com/hashicorp/packer-plugin-sdk/multistep"
 )
 
 func TestStepCreateBlockStorageInstanceShouldFailIfOperationCreateBlockStorageInstanceFails(t *testing.T) {
 
 	var testSubject = &StepCreateBlockStorageInstance{
-		CreateBlockStorageInstance: func(serverInstanceNo string) (string, error) { return "", fmt.Errorf("!! Unit Test FAIL !!") },
-		Say:    func(message string) {},
-		Error:  func(e error) {},
-		Config: new(Config),
+		CreateBlockStorageInstance: func(serverInstanceNo string) (*string, error) { return nil, fmt.Errorf("!! Unit Test FAIL !!") },
+		Say:                        func(message string) {},
+		Error:                      func(e error) {},
+		Config:                     new(Config),
 	}
 
 	testSubject.Config.BlockStorageSize = 10
@@ -33,11 +33,12 @@ func TestStepCreateBlockStorageInstanceShouldFailIfOperationCreateBlockStorageIn
 }
 
 func TestStepCreateBlockStorageInstanceShouldPassIfOperationCreateBlockStorageInstancePasses(t *testing.T) {
+	var instanceNo = "a"
 	var testSubject = &StepCreateBlockStorageInstance{
-		CreateBlockStorageInstance: func(serverInstanceNo string) (string, error) { return "a", nil },
-		Say:    func(message string) {},
-		Error:  func(e error) {},
-		Config: new(Config),
+		CreateBlockStorageInstance: func(serverInstanceNo string) (*string, error) { return &instanceNo, nil },
+		Say:                        func(message string) {},
+		Error:                      func(e error) {},
+		Config:                     new(Config),
 	}
 
 	testSubject.Config.BlockStorageSize = 10

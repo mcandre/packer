@@ -5,7 +5,7 @@ import (
 	"errors"
 	"testing"
 
-	"github.com/hashicorp/packer/helper/multistep"
+	"github.com/hashicorp/packer-plugin-sdk/multistep"
 	"github.com/stretchr/testify/assert"
 )
 
@@ -47,6 +47,8 @@ func TestStepCreateImage(t *testing.T) {
 	assert.Equal(t, d.CreateImageDisk, c.DiskName, "Incorrect disk passed to driver.")
 	assert.Equal(t, d.CreateImageLabels, c.ImageLabels, "Incorrect image_labels passed to driver.")
 	assert.Equal(t, d.CreateImageLicenses, c.ImageLicenses, "Incorrect image_licenses passed to driver.")
+	assert.Equal(t, d.CreateImageEncryptionKey, c.ImageEncryptionKey.ComputeType(), "Incorrect image_encryption_key passed to driver.")
+	assert.Equal(t, d.CreateImageStorageLocations, c.ImageStorageLocations, "Incorrect image_storage_locations passed to driver.")
 }
 
 func TestStepCreateImage_errorOnChannel(t *testing.T) {

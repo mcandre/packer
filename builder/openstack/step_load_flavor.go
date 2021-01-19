@@ -6,8 +6,9 @@ import (
 	"log"
 
 	"github.com/gophercloud/gophercloud/openstack/compute/v2/flavors"
-	"github.com/hashicorp/packer/helper/multistep"
-	"github.com/hashicorp/packer/packer"
+	flavors_utils "github.com/gophercloud/utils/openstack/compute/v2/flavors"
+	"github.com/hashicorp/packer-plugin-sdk/multistep"
+	packersdk "github.com/hashicorp/packer-plugin-sdk/packer"
 )
 
 // StepLoadFlavor gets the FlavorRef from a Flavor. It first assumes
@@ -17,9 +18,9 @@ type StepLoadFlavor struct {
 	Flavor string
 }
 
-func (s *StepLoadFlavor) Run(_ context.Context, state multistep.StateBag) multistep.StepAction {
-	config := state.Get("config").(Config)
-	ui := state.Get("ui").(packer.Ui)
+func (s *StepLoadFlavor) Run(ctx context.Context, state multistep.StateBag) multistep.StepAction {
+	config := state.Get("config").(*Config)
+	ui := state.Get("ui").(packersdk.Ui)
 
 	// We need the v2 compute client
 	client, err := config.computeV2Client()
@@ -37,7 +38,7 @@ func (s *StepLoadFlavor) Run(_ context.Context, state multistep.StateBag) multis
 		geterr := err
 
 		log.Printf("[INFO] Loading flavor by name: %s", s.Flavor)
-		id, err := flavors.IDFromName(client, s.Flavor)
+		id, err := flavors_utils.IDFromName(client, s.Flavor)
 		if err != nil {
 			log.Printf("[ERROR] Failed to find flavor by name: %s", err)
 			err = fmt.Errorf(

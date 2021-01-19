@@ -5,8 +5,8 @@ import (
 	"fmt"
 	"time"
 
-	"github.com/hashicorp/packer/helper/multistep"
-	"github.com/hashicorp/packer/packer"
+	"github.com/hashicorp/packer-plugin-sdk/multistep"
+	packersdk "github.com/hashicorp/packer-plugin-sdk/packer"
 )
 
 const (
@@ -16,9 +16,9 @@ const (
 type StepWaitForPowerOff struct {
 }
 
-func (s *StepWaitForPowerOff) Run(_ context.Context, state multistep.StateBag) multistep.StepAction {
+func (s *StepWaitForPowerOff) Run(ctx context.Context, state multistep.StateBag) multistep.StepAction {
 	driver := state.Get("driver").(Driver)
-	ui := state.Get("ui").(packer.Ui)
+	ui := state.Get("ui").(packersdk.Ui)
 	vmName := state.Get("vmName").(string)
 	ui.Say("Waiting for vm to be powered down...")
 
@@ -50,9 +50,9 @@ type StepWaitForInstallToComplete struct {
 	ActionName          string
 }
 
-func (s *StepWaitForInstallToComplete) Run(_ context.Context, state multistep.StateBag) multistep.StepAction {
+func (s *StepWaitForInstallToComplete) Run(ctx context.Context, state multistep.StateBag) multistep.StepAction {
 	driver := state.Get("driver").(Driver)
-	ui := state.Get("ui").(packer.Ui)
+	ui := state.Get("ui").(packersdk.Ui)
 	vmName := state.Get("vmName").(string)
 
 	if len(s.ActionName) > 0 {

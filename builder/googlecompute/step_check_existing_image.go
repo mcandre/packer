@@ -4,8 +4,8 @@ import (
 	"context"
 	"fmt"
 
-	"github.com/hashicorp/packer/helper/multistep"
-	"github.com/hashicorp/packer/packer"
+	"github.com/hashicorp/packer-plugin-sdk/multistep"
+	packersdk "github.com/hashicorp/packer-plugin-sdk/packer"
 )
 
 // StepCheckExistingImage represents a Packer build step that checks if the
@@ -13,10 +13,10 @@ import (
 type StepCheckExistingImage int
 
 // Run executes the Packer build step that checks if the image already exists.
-func (s *StepCheckExistingImage) Run(_ context.Context, state multistep.StateBag) multistep.StepAction {
+func (s *StepCheckExistingImage) Run(ctx context.Context, state multistep.StateBag) multistep.StepAction {
 	c := state.Get("config").(*Config)
 	d := state.Get("driver").(Driver)
-	ui := state.Get("ui").(packer.Ui)
+	ui := state.Get("ui").(packersdk.Ui)
 
 	ui.Say("Checking image does not exist...")
 	c.imageAlreadyExists = d.ImageExists(c.ImageName)

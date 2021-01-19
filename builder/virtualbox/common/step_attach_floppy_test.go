@@ -6,7 +6,7 @@ import (
 	"os"
 	"testing"
 
-	"github.com/hashicorp/packer/helper/multistep"
+	"github.com/hashicorp/packer-plugin-sdk/multistep"
 )
 
 func TestStepAttachFloppy_impl(t *testing.T) {
@@ -36,6 +36,10 @@ func TestStepAttachFloppy(t *testing.T) {
 	}
 	if _, ok := state.GetOk("error"); ok {
 		t.Fatal("should NOT have error")
+	}
+
+	if driver.RemoveFloppyControllersVM == "" {
+		t.Fatal("RemoveFloppyControllers was not called")
 	}
 
 	if len(driver.VBoxManageCalls) != 2 {

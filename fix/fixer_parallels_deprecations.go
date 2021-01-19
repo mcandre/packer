@@ -9,6 +9,12 @@ import (
 // "guest_os_type", possibly overwriting any existing "guest_os_type"
 type FixerParallelsDeprecations struct{}
 
+func (FixerParallelsDeprecations) DeprecatedOptions() map[string][]string {
+	return map[string][]string{
+		"packer.parallels": []string{"parallels_tools_host_path", "guest_os_distribution"},
+	}
+}
+
 func (FixerParallelsDeprecations) Fix(input map[string]interface{}) (map[string]interface{}, error) {
 	// The type we'll decode into; we only care about builders
 	type template struct {
@@ -54,6 +60,5 @@ func (FixerParallelsDeprecations) Fix(input map[string]interface{}) (map[string]
 }
 
 func (FixerParallelsDeprecations) Synopsis() string {
-	return `Removes deprecated "parallels_tools_host_path" from Parallels builders
-	and changes "guest_os_distribution" to "guest_os_type".`
+	return `Removes deprecated "parallels_tools_host_path" from Parallels builders and changes "guest_os_distribution" to "guest_os_type".`
 }

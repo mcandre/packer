@@ -5,12 +5,18 @@ import (
 	"fmt"
 	"strings"
 
-	"github.com/hashicorp/packer/helper/multistep"
-	"github.com/hashicorp/packer/packer"
-	"github.com/hashicorp/packer/template/interpolate"
+	"github.com/hashicorp/packer-plugin-sdk/multistep"
+	packersdk "github.com/hashicorp/packer-plugin-sdk/packer"
+	"github.com/hashicorp/packer-plugin-sdk/template/interpolate"
 )
 
 type commandTemplate struct {
+	// HTTPIP is the HTTP server's IP address.
+	HTTPIP string
+
+	// HTTPPort is the HTTP server port.
+	HTTPPort int
+
 	Name string
 }
 
@@ -19,7 +25,7 @@ type commandTemplate struct {
 //
 // Uses:
 //   driver Driver
-//   ui packer.Ui
+//   ui packersdk.Ui
 //   vmName string
 //
 // Produces:
@@ -28,17 +34,22 @@ type StepVBoxManage struct {
 	Ctx      interpolate.Context
 }
 
-func (s *StepVBoxManage) Run(_ context.Context, state multistep.StateBag) multistep.StepAction {
+func (s *StepVBoxManage) Run(ctx context.Context, state multistep.StateBag) multistep.StepAction {
 	driver := state.Get("driver").(Driver)
-	ui := state.Get("ui").(packer.Ui)
+	ui := state.Get("ui").(packersdk.Ui)
 	vmName := state.Get("vmName").(string)
 
 	if len(s.Commands) > 0 {
 		ui.Say("Executing custom VBoxManage commands...")
 	}
 
+	hostIP := state.Get("http_ip").(string)
+	httpPort := state.Get("http_port").(int)
+
 	s.Ctx.Data = &commandTemplate{
-		Name: vmName,
+		Name:     vmName,
+		HTTPIP:   hostIP,
+		HTTPPort: httpPort,
 	}
 
 	for _, originalCommand := range s.Commands {

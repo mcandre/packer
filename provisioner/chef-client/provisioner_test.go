@@ -7,7 +7,7 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/hashicorp/packer/packer"
+	packersdk "github.com/hashicorp/packer-plugin-sdk/packer"
 )
 
 func testConfig() map[string]interface{} {
@@ -19,7 +19,7 @@ func testConfig() map[string]interface{} {
 func TestProvisioner_Impl(t *testing.T) {
 	var raw interface{}
 	raw = &Provisioner{}
-	if _, ok := raw.(packer.Provisioner); !ok {
+	if _, ok := raw.(packersdk.Provisioner); !ok {
 		t.Fatalf("must be a Provisioner")
 	}
 }
@@ -138,6 +138,59 @@ func TestProvisionerPrepare_serverUrl(t *testing.T) {
 		t.Fatalf("err: %s", err)
 	}
 }
+func TestProvisionerPrepare_chefLicense(t *testing.T) {
+	var p Provisioner
+
+	// Test not set
+	config := testConfig()
+	err := p.Prepare(config)
+	if err != nil {
+		t.Fatal("should error")
+	}
+
+	if p.config.ChefLicense != "accept-silent" {
+		t.Fatalf("unexpected: %#v", p.config.ChefLicense)
+	}
+
+	// Test set
+	config = testConfig()
+	config["chef_license"] = "accept"
+	p = Provisioner{}
+	err = p.Prepare(config)
+	if err != nil {
+		t.Fatalf("err: %s", err)
+	}
+
+	if p.config.ChefLicense != "accept" {
+		t.Fatalf("unexpected: %#v", p.config.ChefLicense)
+	}
+
+	// Test set skipInstall true
+	config = testConfig()
+	config["skip_install"] = true
+	p = Provisioner{}
+	err = p.Prepare(config)
+	if err != nil {
+		t.Fatalf("err: %s", err)
+	}
+
+	if p.config.ChefLicense != "" {
+		t.Fatalf("unexpected: %#v", "empty string")
+	}
+
+	// Test set installCommand true
+	config = testConfig()
+	config["install_command"] = "install chef"
+	p = Provisioner{}
+	err = p.Prepare(config)
+	if err != nil {
+		t.Fatalf("err: %s", err)
+	}
+
+	if p.config.ChefLicense != "" {
+		t.Fatalf("unexpected: %#v", "empty string")
+	}
+}
 
 func TestProvisionerPrepare_encryptedDataBagSecretPath(t *testing.T) {
 	var err error
@@ -188,8 +241,8 @@ func TestProvisioner_createDir(t *testing.T) {
 		config["prevent_sudo"] = !sudo
 
 		p := &Provisioner{}
-		comm := &packer.MockCommunicator{}
-		ui := &packer.BasicUi{
+		comm := &packersdk.MockCommunicator{}
+		ui := &packersdk.BasicUi{
 			Reader: new(bytes.Buffer),
 			Writer: new(bytes.Buffer),
 		}
@@ -219,8 +272,8 @@ func TestProvisioner_removeDir(t *testing.T) {
 		config["prevent_sudo"] = !sudo
 
 		p := &Provisioner{}
-		comm := &packer.MockCommunicator{}
-		ui := &packer.BasicUi{
+		comm := &packersdk.MockCommunicator{}
+		ui := &packersdk.BasicUi{
 			Reader: new(bytes.Buffer),
 			Writer: new(bytes.Buffer),
 		}

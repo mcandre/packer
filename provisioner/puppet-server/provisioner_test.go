@@ -5,30 +5,34 @@ import (
 	"os"
 	"testing"
 
-	"github.com/hashicorp/packer/packer"
+	packersdk "github.com/hashicorp/packer-plugin-sdk/packer"
 )
 
-func testConfig() map[string]interface{} {
+func testConfig() (config map[string]interface{}, tf *os.File) {
 	tf, err := ioutil.TempFile("", "packer")
 	if err != nil {
 		panic(err)
 	}
 
-	return map[string]interface{}{
+	config = map[string]interface{}{
 		"puppet_server": tf.Name(),
 	}
+
+	return config, tf
 }
 
 func TestProvisioner_Impl(t *testing.T) {
 	var raw interface{}
 	raw = &Provisioner{}
-	if _, ok := raw.(packer.Provisioner); !ok {
+	if _, ok := raw.(packersdk.Provisioner); !ok {
 		t.Fatalf("must be a Provisioner")
 	}
 }
 
 func TestProvisionerPrepare_puppetBinDir(t *testing.T) {
-	config := testConfig()
+	config, tempfile := testConfig()
+	defer os.Remove(tempfile.Name())
+	defer tempfile.Close()
 
 	delete(config, "puppet_bin_dir")
 	p := new(Provisioner)
@@ -53,7 +57,9 @@ func TestProvisionerPrepare_puppetBinDir(t *testing.T) {
 }
 
 func TestProvisionerPrepare_clientPrivateKeyPath(t *testing.T) {
-	config := testConfig()
+	config, tempfile := testConfig()
+	defer os.Remove(tempfile.Name())
+	defer tempfile.Close()
 
 	delete(config, "client_private_key_path")
 	p := new(Provisioner)
@@ -86,7 +92,9 @@ func TestProvisionerPrepare_clientPrivateKeyPath(t *testing.T) {
 }
 
 func TestProvisionerPrepare_clientCertPath(t *testing.T) {
-	config := testConfig()
+	config, tempfile := testConfig()
+	defer os.Remove(tempfile.Name())
+	defer tempfile.Close()
 
 	delete(config, "client_cert_path")
 	p := new(Provisioner)
@@ -119,7 +127,9 @@ func TestProvisionerPrepare_clientCertPath(t *testing.T) {
 }
 
 func TestProvisionerPrepare_executeCommand(t *testing.T) {
-	config := testConfig()
+	config, tempfile := testConfig()
+	defer os.Remove(tempfile.Name())
+	defer tempfile.Close()
 
 	delete(config, "execute_command")
 	p := new(Provisioner)
@@ -130,7 +140,9 @@ func TestProvisionerPrepare_executeCommand(t *testing.T) {
 }
 
 func TestProvisionerPrepare_facterFacts(t *testing.T) {
-	config := testConfig()
+	config, tempfile := testConfig()
+	defer os.Remove(tempfile.Name())
+	defer tempfile.Close()
 
 	delete(config, "facter")
 	p := new(Provisioner)
@@ -185,7 +197,9 @@ func TestProvisionerPrepare_facterFacts(t *testing.T) {
 }
 
 func TestProvisionerPrepare_stagingDir(t *testing.T) {
-	config := testConfig()
+	config, tempfile := testConfig()
+	defer os.Remove(tempfile.Name())
+	defer tempfile.Close()
 
 	delete(config, "staging_dir")
 	p := new(Provisioner)

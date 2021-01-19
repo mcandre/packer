@@ -2,12 +2,12 @@ package restart
 
 import (
 	"bytes"
-	"errors"
+	"context"
 	"fmt"
 	"testing"
 	"time"
 
-	"github.com/hashicorp/packer/packer"
+	packersdk "github.com/hashicorp/packer-plugin-sdk/packer"
 )
 
 func testConfig() map[string]interface{} {
@@ -17,7 +17,7 @@ func testConfig() map[string]interface{} {
 func TestProvisioner_Impl(t *testing.T) {
 	var raw interface{}
 	raw = &Provisioner{}
-	if _, ok := raw.(packer.Provisioner); !ok {
+	if _, ok := raw.(packersdk.Provisioner); !ok {
 		t.Fatalf("must be a Provisioner")
 	}
 }
@@ -78,8 +78,8 @@ func TestProvisionerPrepare_InvalidKey(t *testing.T) {
 	}
 }
 
-func testUi() *packer.BasicUi {
-	return &packer.BasicUi{
+func testUi() *packersdk.BasicUi {
+	return &packersdk.BasicUi{
 		Reader:      new(bytes.Buffer),
 		Writer:      new(bytes.Buffer),
 		ErrorWriter: new(bytes.Buffer),
@@ -94,17 +94,17 @@ func TestProvisionerProvision_Success(t *testing.T) {
 	p := new(Provisioner)
 
 	// Defaults provided by Packer
-	comm := new(packer.MockCommunicator)
+	comm := new(packersdk.MockCommunicator)
 	p.Prepare(config)
 	waitForCommunicatorOld := waitForCommunicator
-	waitForCommunicator = func(p *Provisioner) error {
+	waitForCommunicator = func(context.Context, *Provisioner) error {
 		return nil
 	}
 	waitForRestartOld := waitForRestart
-	waitForRestart = func(p *Provisioner, comm packer.Communicator) error {
+	waitForRestart = func(context.Context, *Provisioner, packersdk.Communicator) error {
 		return nil
 	}
-	err := p.Provision(ui, comm)
+	err := p.Provision(context.Background(), ui, comm, make(map[string]interface{}))
 	if err != nil {
 		t.Fatal("should not have error")
 	}
@@ -130,17 +130,17 @@ func TestProvisionerProvision_CustomCommand(t *testing.T) {
 	config["restart_command"] = expectedCommand
 
 	// Defaults provided by Packer
-	comm := new(packer.MockCommunicator)
+	comm := new(packersdk.MockCommunicator)
 	p.Prepare(config)
 	waitForCommunicatorOld := waitForCommunicator
-	waitForCommunicator = func(p *Provisioner) error {
+	waitForCommunicator = func(context.Context, *Provisioner) error {
 		return nil
 	}
 	waitForRestartOld := waitForRestart
-	waitForRestart = func(p *Provisioner, comm packer.Communicator) error {
+	waitForRestart = func(context.Context, *Provisioner, packersdk.Communicator) error {
 		return nil
 	}
-	err := p.Provision(ui, comm)
+	err := p.Provision(context.Background(), ui, comm, make(map[string]interface{}))
 	if err != nil {
 		t.Fatal("should not have error")
 	}
@@ -158,12 +158,12 @@ func TestProvisionerProvision_RestartCommandFail(t *testing.T) {
 	config := testConfig()
 	ui := testUi()
 	p := new(Provisioner)
-	comm := new(packer.MockCommunicator)
+	comm := new(packersdk.MockCommunicator)
 	comm.StartStderr = "WinRM terminated"
 	comm.StartExitStatus = 1
 
 	p.Prepare(config)
-	err := p.Provision(ui, comm)
+	err := p.Provision(context.Background(), ui, comm, make(map[string]interface{}))
 	if err == nil {
 		t.Fatal("should have error")
 	}
@@ -176,13 +176,13 @@ func TestProvisionerProvision_WaitForRestartFail(t *testing.T) {
 	p := new(Provisioner)
 
 	// Defaults provided by Packer
-	comm := new(packer.MockCommunicator)
+	comm := new(packersdk.MockCommunicator)
 	p.Prepare(config)
 	waitForCommunicatorOld := waitForCommunicator
-	waitForCommunicator = func(p *Provisioner) error {
+	waitForCommunicator = func(context.Context, *Provisioner) error {
 		return fmt.Errorf("Machine did not restart properly")
 	}
-	err := p.Provision(ui, comm)
+	err := p.Provision(context.Background(), ui, comm, make(map[string]interface{}))
 	if err == nil {
 		t.Fatal("should have error")
 	}
@@ -197,7 +197,7 @@ func TestProvision_waitForRestartTimeout(t *testing.T) {
 	config["restart_timeout"] = "1ms"
 	ui := testUi()
 	p := new(Provisioner)
-	comm := new(packer.MockCommunicator)
+	comm := new(packersdk.MockCommunicator)
 	var err error
 
 	p.Prepare(config)
@@ -206,7 +206,7 @@ func TestProvision_waitForRestartTimeout(t *testing.T) {
 	waitContinue := make(chan bool)
 
 	// Block until cancel comes through
-	waitForCommunicator = func(p *Provisioner) error {
+	waitForCommunicator = func(context.Context, *Provisioner) error {
 		for {
 			select {
 			case <-waitDone:
@@ -216,7 +216,7 @@ func TestProvision_waitForRestartTimeout(t *testing.T) {
 	}
 
 	go func() {
-		err = p.Provision(ui, comm)
+		err = p.Provision(context.Background(), ui, comm, make(map[string]interface{}))
 		waitDone <- true
 	}()
 	<-waitContinue
@@ -238,14 +238,14 @@ func TestProvision_waitForCommunicator(t *testing.T) {
 	p := new(Provisioner)
 
 	// Defaults provided by Packer
-	comm := new(packer.MockCommunicator)
+	comm := new(packersdk.MockCommunicator)
 	p.comm = comm
 	p.ui = ui
 	comm.StartStderr = "WinRM terminated"
 	comm.StartStdout = "WIN-V4CEJ7MC5SN restarted."
 	comm.StartExitStatus = 1
 	p.Prepare(config)
-	err := waitForCommunicator(p)
+	err := waitForCommunicator(context.Background(), p)
 
 	if err != nil {
 		t.Fatalf("should not have error, got: %s", err.Error())
@@ -267,12 +267,14 @@ func TestProvision_waitForCommunicatorWithCancel(t *testing.T) {
 	p := new(Provisioner)
 
 	// Defaults provided by Packer
-	comm := new(packer.MockCommunicator)
+	comm := new(packersdk.MockCommunicator)
 	p.comm = comm
 	p.ui = ui
 	retryableSleep = 5 * time.Second
 	p.cancel = make(chan struct{})
 	var err error
+
+	ctx, cancel := context.WithCancel(context.Background())
 
 	comm.StartStderr = "WinRM terminated"
 	comm.StartExitStatus = 1 // Always fail
@@ -285,50 +287,20 @@ func TestProvision_waitForCommunicatorWithCancel(t *testing.T) {
 	waitDone := make(chan bool)
 	go func() {
 		waitStart <- true
-		err = waitForCommunicator(p)
+		err = waitForCommunicator(ctx, p)
 		waitDone <- true
 	}()
 
 	go func() {
 		time.Sleep(10 * time.Millisecond)
 		<-waitStart
-		p.Cancel()
+		cancel()
 	}()
 	<-waitDone
 
 	// Expect a Cancel error
 	if err == nil {
 		t.Fatalf("Should have err")
-	}
-}
-
-func TestRetryable(t *testing.T) {
-	config := testConfig()
-
-	count := 0
-	retryMe := func() error {
-		t.Logf("RetryMe, attempt number %d", count)
-		if count == 2 {
-			return nil
-		}
-		count++
-		return errors.New(fmt.Sprintf("Still waiting %d more times...", 2-count))
-	}
-	retryableSleep = 50 * time.Millisecond
-	p := new(Provisioner)
-	p.config.RestartTimeout = 155 * time.Millisecond
-	err := p.Prepare(config)
-	err = p.retryable(retryMe)
-	if err != nil {
-		t.Fatalf("should not have error retrying function")
-	}
-
-	count = 0
-	p.config.RestartTimeout = 10 * time.Millisecond
-	err = p.Prepare(config)
-	err = p.retryable(retryMe)
-	if err == nil {
-		t.Fatalf("should have error retrying function")
 	}
 }
 
@@ -339,38 +311,27 @@ func TestProvision_Cancel(t *testing.T) {
 	ui := testUi()
 	p := new(Provisioner)
 
-	var err error
-
-	comm := new(packer.MockCommunicator)
+	comm := new(packersdk.MockCommunicator)
 	p.Prepare(config)
-	waitStart := make(chan bool)
-	waitDone := make(chan bool)
+	done := make(chan error)
+
+	topCtx, cancelTopCtx := context.WithCancel(context.Background())
 
 	// Block until cancel comes through
-	waitForCommunicator = func(p *Provisioner) error {
-		waitStart <- true
-		for {
-			select {
-			case <-p.cancel:
-			}
-		}
+	waitForCommunicator = func(ctx context.Context, p *Provisioner) error {
+		cancelTopCtx()
+		<-ctx.Done()
+		return ctx.Err()
 	}
 
 	// Create two go routines to provision and cancel in parallel
 	// Provision will block until cancel happens
 	go func() {
-		err = p.Provision(ui, comm)
-		waitDone <- true
+		done <- p.Provision(topCtx, ui, comm, make(map[string]interface{}))
 	}()
-
-	go func() {
-		<-waitStart
-		p.Cancel()
-	}()
-	<-waitDone
 
 	// Expect interrupt error
-	if err == nil {
+	if err := <-done; err == nil {
 		t.Fatal("should have error")
 	}
 }

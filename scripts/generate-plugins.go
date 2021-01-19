@@ -15,6 +15,8 @@ import (
 	"path/filepath"
 	"sort"
 	"strings"
+
+	"golang.org/x/tools/imports"
 )
 
 const target = "command/plugin.go"
@@ -53,10 +55,12 @@ func main() {
 
 	// Write our generated code to the command/plugin.go file
 	file, err := os.Create(target)
-	defer file.Close()
 	if err != nil {
 		log.Fatalf("Failed to open %s for writing: %s", target, err)
 	}
+	defer file.Close()
+
+	output = string(goFmt(target, []byte(output)))
 
 	_, err = file.WriteString(output)
 	if err != nil {
@@ -64,6 +68,15 @@ func main() {
 	}
 
 	log.Printf("Generated %s", target)
+}
+
+func goFmt(filename string, b []byte) []byte {
+	fb, err := imports.Process(filename, b, nil)
+	if err != nil {
+		log.Printf("formatting err: %v", err)
+		return b
+	}
+	return fb
 }
 
 type plugin struct {
@@ -77,14 +90,14 @@ type plugin struct {
 // makeMap creates a map named Name with type packer.Name that looks something
 // like this:
 //
-// var Builders = map[string]packer.Builder{
+// var Builders = map[string]packersdk.Builder{
 // 	"amazon-chroot":   new(chroot.Builder),
 // 	"amazon-ebs":      new(ebs.Builder),
 // 	"amazon-instance": new(instance.Builder),
 func makeMap(varName, varType string, items []plugin) string {
 	output := ""
 
-	output += fmt.Sprintf("var %s = map[string]packer.%s{\n", varName, varType)
+	output += fmt.Sprintf("var %s = map[string]packersdk.%s{\n", varName, varType)
 	for _, item := range items {
 		output += fmt.Sprintf("\t\"%s\":   new(%s.%s),\n", item.PluginName, item.ImportName, item.TypeName)
 	}
@@ -123,15 +136,17 @@ func listDirectories(path string) ([]string, error) {
 
 	for _, item := range items {
 		// We only want directories
-		if item.IsDir() {
-			currentDir := filepath.Join(path, item.Name())
-			names = append(names, currentDir)
+		if !item.IsDir() ||
+			item.Name() == "common" {
+			continue
+		}
+		currentDir := filepath.Join(path, item.Name())
+		names = append(names, currentDir)
 
-			// Do some recursion
-			subNames, err := listDirectories(currentDir)
-			if err == nil {
-				names = append(names, subNames...)
-			}
+		// Do some recursion
+		subNames, err := listDirectories(currentDir)
+		if err == nil {
+			names = append(names, subNames...)
 		}
 	}
 
@@ -239,7 +254,8 @@ import (
 	"strings"
 
 	"github.com/hashicorp/packer/packer"
-	"github.com/hashicorp/packer/packer/plugin"
+packersdk "github.com/hashicorp/packer-plugin-sdk/packer"
+	"github.com/hashicorp/packer-plugin-sdk/plugin"
 
 IMPORTS
 )

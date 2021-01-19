@@ -3,6 +3,9 @@ package googlecompute
 import (
 	"crypto/rsa"
 	"time"
+
+	compute "google.golang.org/api/compute/v1"
+	oslogin "google.golang.org/api/oslogin/v1"
 )
 
 // Driver is the interface that has to be implemented to communicate
@@ -11,7 +14,7 @@ import (
 type Driver interface {
 	// CreateImage creates an image from the given disk in Google Compute
 	// Engine.
-	CreateImage(name, description, family, zone, disk string, image_labels map[string]string, image_licenses []string) (<-chan *Image, <-chan error)
+	CreateImage(name, description, family, zone, disk string, image_labels map[string]string, image_licenses []string, image_encryption_key *compute.CustomerEncryptionKey, imageStorageLocation []string) (<-chan *Image, <-chan error)
 
 	// DeleteImage deletes the image with the given name.
 	DeleteImage(name string) <-chan error
@@ -26,6 +29,11 @@ type Driver interface {
 	// fromFamily is true, name designates an image family instead of a
 	// particular image.
 	GetImage(name string, fromFamily bool) (*Image, error)
+
+	// GetImageFromProject gets an image from a specific projects.
+	// Returns the image from the first project in slice it can find one
+	// If fromFamily is true, name designates an image family instead of a particular image.
+	GetImageFromProjects(project []string, name string, fromFamily bool) (*Image, error)
 
 	// GetImageFromProject gets an image from a specific project. If fromFamily
 	// is true, name designates an image family instead of a particular image.
@@ -55,33 +63,48 @@ type Driver interface {
 
 	// CreateOrResetWindowsPassword creates or resets the password for a user on an Windows instance.
 	CreateOrResetWindowsPassword(zone, name string, config *WindowsPasswordConfig) (<-chan error, error)
+
+	// ImportOSLoginSSHKey imports SSH public key for OSLogin.
+	ImportOSLoginSSHKey(user, sshPublicKey string) (*oslogin.LoginProfile, error)
+
+	// DeleteOSLoginSSHKey deletes the SSH public key for OSLogin with the given key.
+	DeleteOSLoginSSHKey(user, fingerprint string) error
+
+	// Add to the instance metadata for the existing instance
+	AddToInstanceMetadata(zone string, name string, metadata map[string]string) error
 }
 
 type InstanceConfig struct {
-	AcceleratorType   string
-	AcceleratorCount  int64
-	Address           string
-	Description       string
-	DiskSizeGb        int64
-	DiskType          string
-	Image             *Image
-	Labels            map[string]string
-	MachineType       string
-	Metadata          map[string]string
-	Name              string
-	Network           string
-	NetworkProjectId  string
-	OmitExternalIP    bool
-	OnHostMaintenance string
-	Preemptible       bool
-	Region            string
-	Scopes            []string
-	Subnetwork        string
-	Tags              []string
-	Zone              string
+	AcceleratorType              string
+	AcceleratorCount             int64
+	Address                      string
+	Description                  string
+	DisableDefaultServiceAccount bool
+	DiskSizeGb                   int64
+	DiskType                     string
+	EnableSecureBoot             bool
+	EnableVtpm                   bool
+	EnableIntegrityMonitoring    bool
+	Image                        *Image
+	Labels                       map[string]string
+	MachineType                  string
+	Metadata                     map[string]string
+	MinCpuPlatform               string
+	Name                         string
+	Network                      string
+	NetworkProjectId             string
+	OmitExternalIP               bool
+	OnHostMaintenance            string
+	Preemptible                  bool
+	Region                       string
+	ServiceAccountEmail          string
+	Scopes                       []string
+	Subnetwork                   string
+	Tags                         []string
+	Zone                         string
 }
 
-// WindowsPasswordConfig is the data structue that GCE needs to encrypt the created
+// WindowsPasswordConfig is the data structure that GCE needs to encrypt the created
 // windows password.
 type WindowsPasswordConfig struct {
 	key      *rsa.PrivateKey

@@ -1,14 +1,16 @@
+//go:generate mapstructure-to-hcl2 -type Config
+
 package profitbricks
 
 import (
 	"errors"
 	"os"
 
-	"github.com/hashicorp/packer/common"
-	"github.com/hashicorp/packer/helper/communicator"
-	"github.com/hashicorp/packer/helper/config"
-	"github.com/hashicorp/packer/packer"
-	"github.com/hashicorp/packer/template/interpolate"
+	"github.com/hashicorp/packer-plugin-sdk/common"
+	"github.com/hashicorp/packer-plugin-sdk/communicator"
+	packersdk "github.com/hashicorp/packer-plugin-sdk/packer"
+	"github.com/hashicorp/packer-plugin-sdk/template/config"
+	"github.com/hashicorp/packer-plugin-sdk/template/interpolate"
 	"github.com/mitchellh/mapstructure"
 )
 
@@ -23,18 +25,16 @@ type Config struct {
 	Region       string `mapstructure:"location"`
 	Image        string `mapstructure:"image"`
 	SSHKey       string
-	SnapshotName string              `mapstructure:"snapshot_name"`
-	DiskSize     int                 `mapstructure:"disk_size"`
-	DiskType     string              `mapstructure:"disk_type"`
-	Cores        int                 `mapstructure:"cores"`
-	Ram          int                 `mapstructure:"ram"`
-	Retries      int                 `mapstructure:"retries"`
-	CommConfig   communicator.Config `mapstructure:",squash"`
+	SnapshotName string `mapstructure:"snapshot_name"`
+	DiskSize     int    `mapstructure:"disk_size"`
+	DiskType     string `mapstructure:"disk_type"`
+	Cores        int    `mapstructure:"cores"`
+	Ram          int    `mapstructure:"ram"`
+	Retries      int    `mapstructure:"retries"`
 	ctx          interpolate.Context
 }
 
-func NewConfig(raws ...interface{}) (*Config, []string, error) {
-	var c Config
+func (c *Config) Prepare(raws ...interface{}) ([]string, error) {
 
 	var md mapstructure.Metadata
 	err := config.Decode(&c, &config.DecodeOpts{
@@ -48,13 +48,13 @@ func NewConfig(raws ...interface{}) (*Config, []string, error) {
 		},
 	}, raws...)
 	if err != nil {
-		return nil, nil, err
+		return nil, err
 	}
 
-	var errs *packer.MultiError
+	var errs *packersdk.MultiError
 
-	if c.Comm.SSHPassword == "" && c.Comm.SSHPrivateKey == "" {
-		errs = packer.MultiErrorAppend(
+	if c.Comm.SSHPassword == "" && c.Comm.SSHPrivateKeyFile == "" {
+		errs = packersdk.MultiErrorAppend(
 			errs, errors.New("Either ssh private key path or ssh password must be set."))
 	}
 
@@ -101,28 +101,28 @@ func NewConfig(raws ...interface{}) (*Config, []string, error) {
 	}
 
 	if es := c.Comm.Prepare(&c.ctx); len(es) > 0 {
-		errs = packer.MultiErrorAppend(errs, es...)
+		errs = packersdk.MultiErrorAppend(errs, es...)
 	}
 
 	if c.Image == "" {
-		errs = packer.MultiErrorAppend(
+		errs = packersdk.MultiErrorAppend(
 			errs, errors.New("ProfitBricks 'image' is required"))
 	}
 
 	if c.PBUsername == "" {
-		errs = packer.MultiErrorAppend(
+		errs = packersdk.MultiErrorAppend(
 			errs, errors.New("ProfitBricks username is required"))
 	}
 
 	if c.PBPassword == "" {
-		errs = packer.MultiErrorAppend(
+		errs = packersdk.MultiErrorAppend(
 			errs, errors.New("ProfitBricks password is required"))
 	}
 
 	if errs != nil && len(errs.Errors) > 0 {
-		return nil, nil, errs
+		return nil, errs
 	}
-	common.ScrubConfig(c, c.PBUsername)
+	packersdk.LogSecretFilter.Set(c.PBUsername)
 
-	return &c, nil, nil
+	return nil, nil
 }

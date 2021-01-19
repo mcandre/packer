@@ -6,7 +6,7 @@ import (
 	"io/ioutil"
 	"os"
 
-	"github.com/hashicorp/packer/helper/multistep"
+	"github.com/hashicorp/packer-plugin-sdk/multistep"
 
 	"testing"
 )
@@ -75,6 +75,7 @@ func TestStepCreateOrResetWindowsPassword_debug(t *testing.T) {
 	if err != nil {
 		t.Fatalf("err: %s", err)
 	}
+	defer os.Remove(tf.Name())
 	tf.Close()
 
 	state := testState(t)

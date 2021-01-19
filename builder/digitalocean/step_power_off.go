@@ -6,16 +6,16 @@ import (
 	"log"
 
 	"github.com/digitalocean/godo"
-	"github.com/hashicorp/packer/helper/multistep"
-	"github.com/hashicorp/packer/packer"
+	"github.com/hashicorp/packer-plugin-sdk/multistep"
+	packersdk "github.com/hashicorp/packer-plugin-sdk/packer"
 )
 
 type stepPowerOff struct{}
 
-func (s *stepPowerOff) Run(_ context.Context, state multistep.StateBag) multistep.StepAction {
+func (s *stepPowerOff) Run(ctx context.Context, state multistep.StateBag) multistep.StepAction {
 	client := state.Get("client").(*godo.Client)
-	c := state.Get("config").(Config)
-	ui := state.Get("ui").(packer.Ui)
+	c := state.Get("config").(*Config)
+	ui := state.Get("ui").(packersdk.Ui)
 	dropletId := state.Get("droplet_id").(int)
 
 	droplet, _, err := client.Droplets.Get(context.TODO(), dropletId)

@@ -1,17 +1,28 @@
 package plugin
 
 import (
+	"context"
 	"log"
 
-	"github.com/hashicorp/packer/packer"
+	"github.com/hashicorp/hcl/v2/hcldec"
+	packersdk "github.com/hashicorp/packer-plugin-sdk/packer"
 )
 
 type cmdBuilder struct {
-	builder packer.Builder
+	builder packersdk.Builder
 	client  *Client
 }
 
-func (b *cmdBuilder) Prepare(config ...interface{}) ([]string, error) {
+func (b *cmdBuilder) ConfigSpec() hcldec.ObjectSpec {
+	defer func() {
+		r := recover()
+		b.checkExit(r, nil)
+	}()
+
+	return b.builder.ConfigSpec()
+}
+
+func (b *cmdBuilder) Prepare(config ...interface{}) ([]string, []string, error) {
 	defer func() {
 		r := recover()
 		b.checkExit(r, nil)
@@ -20,22 +31,13 @@ func (b *cmdBuilder) Prepare(config ...interface{}) ([]string, error) {
 	return b.builder.Prepare(config...)
 }
 
-func (b *cmdBuilder) Run(ui packer.Ui, hook packer.Hook, cache packer.Cache) (packer.Artifact, error) {
+func (b *cmdBuilder) Run(ctx context.Context, ui packersdk.Ui, hook packersdk.Hook) (packersdk.Artifact, error) {
 	defer func() {
 		r := recover()
 		b.checkExit(r, nil)
 	}()
 
-	return b.builder.Run(ui, hook, cache)
-}
-
-func (b *cmdBuilder) Cancel() {
-	defer func() {
-		r := recover()
-		b.checkExit(r, nil)
-	}()
-
-	b.builder.Cancel()
+	return b.builder.Run(ctx, ui, hook)
 }
 
 func (c *cmdBuilder) checkExit(p interface{}, cb func()) {

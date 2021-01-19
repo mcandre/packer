@@ -3,8 +3,8 @@ package arm
 import (
 	"encoding/json"
 
-	"github.com/Azure/azure-sdk-for-go/arm/compute"
-	"github.com/Azure/azure-sdk-for-go/arm/resources/resources"
+	"github.com/Azure/azure-sdk-for-go/services/compute/mgmt/2018-04-01/compute"
+	"github.com/Azure/azure-sdk-for-go/services/resources/mgmt/2018-02-01/resources"
 
 	"fmt"
 
@@ -17,9 +17,10 @@ type templateFactoryFunc func(*Config) (*resources.Deployment, error)
 func GetKeyVaultDeployment(config *Config) (*resources.Deployment, error) {
 	params := &template.TemplateParameters{
 		KeyVaultName:        &template.TemplateParameter{Value: config.tmpKeyVaultName},
+		KeyVaultSKU:         &template.TemplateParameter{Value: config.BuildKeyVaultSKU},
 		KeyVaultSecretValue: &template.TemplateParameter{Value: config.winrmCertificate},
-		ObjectId:            &template.TemplateParameter{Value: config.ObjectID},
-		TenantId:            &template.TemplateParameter{Value: config.TenantID},
+		ObjectId:            &template.TemplateParameter{Value: config.ClientConfig.ObjectID},
+		TenantId:            &template.TemplateParameter{Value: config.ClientConfig.TenantID},
 	}
 
 	builder, _ := template.NewTemplateBuilder(template.KeyVault)
@@ -34,62 +35,152 @@ func GetVirtualMachineDeployment(config *Config) (*resources.Deployment, error) 
 		AdminUsername:              &template.TemplateParameter{Value: config.UserName},
 		AdminPassword:              &template.TemplateParameter{Value: config.Password},
 		DnsNameForPublicIP:         &template.TemplateParameter{Value: config.tmpComputeName},
+		NicName:                    &template.TemplateParameter{Value: config.tmpNicName},
 		OSDiskName:                 &template.TemplateParameter{Value: config.tmpOSDiskName},
+		DataDiskName:               &template.TemplateParameter{Value: config.tmpDataDiskName},
+		PublicIPAddressName:        &template.TemplateParameter{Value: config.tmpPublicIPAddressName},
+		SubnetName:                 &template.TemplateParameter{Value: config.tmpSubnetName},
 		StorageAccountBlobEndpoint: &template.TemplateParameter{Value: config.storageAccountBlobEndpoint},
-		VMSize: &template.TemplateParameter{Value: config.VMSize},
-		VMName: &template.TemplateParameter{Value: config.tmpComputeName},
+		VirtualNetworkName:         &template.TemplateParameter{Value: config.tmpVirtualNetworkName},
+		NsgName:                    &template.TemplateParameter{Value: config.tmpNsgName},
+		VMSize:                     &template.TemplateParameter{Value: config.VMSize},
+		VMName:                     &template.TemplateParameter{Value: config.tmpComputeName},
 	}
 
-	builder, _ := template.NewTemplateBuilder(template.BasicTemplate)
+	builder, err := template.NewTemplateBuilder(template.BasicTemplate)
+	if err != nil {
+		return nil, err
+	}
 	osType := compute.Linux
 
 	switch config.OSType {
 	case constants.Target_Linux:
-		builder.BuildLinux(config.sshAuthorizedKey)
+		err = builder.BuildLinux(config.sshAuthorizedKey, config.Comm.SSHPassword == "") // if ssh password is not explicitly specified, disable password auth
+		if err != nil {
+			return nil, err
+		}
 	case constants.Target_Windows:
 		osType = compute.Windows
-		builder.BuildWindows(config.tmpKeyVaultName, config.tmpWinRMCertificateUrl)
+		err = builder.BuildWindows(config.tmpKeyVaultName, config.tmpWinRMCertificateUrl)
+		if err != nil {
+			return nil, err
+		}
+	}
+
+	if len(config.UserAssignedManagedIdentities) != 0 {
+		if err := builder.SetIdentity(config.UserAssignedManagedIdentities); err != nil {
+			return nil, err
+		}
 	}
 
 	if config.ImageUrl != "" {
-		builder.SetImageUrl(config.ImageUrl, osType)
+		err = builder.SetImageUrl(config.ImageUrl, osType, config.diskCachingType)
+		if err != nil {
+			return nil, err
+		}
 	} else if config.CustomManagedImageName != "" {
-		builder.SetManagedDiskUrl(config.customManagedImageID, config.managedImageStorageAccountType)
+		err = builder.SetManagedDiskUrl(config.customManagedImageID, config.managedImageStorageAccountType, config.diskCachingType)
+		if err != nil {
+			return nil, err
+		}
 	} else if config.ManagedImageName != "" && config.ImagePublisher != "" {
 		imageID := fmt.Sprintf("/subscriptions/%s/providers/Microsoft.Compute/locations/%s/publishers/%s/ArtifactTypes/vmimage/offers/%s/skus/%s/versions/%s",
-			config.SubscriptionID,
+			config.ClientConfig.SubscriptionID,
 			config.Location,
 			config.ImagePublisher,
 			config.ImageOffer,
 			config.ImageSku,
 			config.ImageVersion)
 
-		builder.SetManagedMarketplaceImage(config.Location, config.ImagePublisher, config.ImageOffer, config.ImageSku, config.ImageVersion, imageID, config.managedImageStorageAccountType)
+		builder.SetManagedMarketplaceImage(config.Location, config.ImagePublisher, config.ImageOffer, config.ImageSku, config.ImageVersion, imageID, config.managedImageStorageAccountType, config.diskCachingType)
+	} else if config.SharedGallery.Subscription != "" {
+		imageID := fmt.Sprintf("/subscriptions/%s/resourceGroups/%s/providers/Microsoft.Compute/galleries/%s/images/%s",
+			config.SharedGallery.Subscription,
+			config.SharedGallery.ResourceGroup,
+			config.SharedGallery.GalleryName,
+			config.SharedGallery.ImageName)
+		if config.SharedGallery.ImageVersion != "" {
+			imageID += fmt.Sprintf("/versions/%s",
+				config.SharedGallery.ImageVersion)
+		}
+
+		err = builder.SetSharedGalleryImage(config.Location, imageID, config.diskCachingType)
+		if err != nil {
+			return nil, err
+		}
 	} else {
-		builder.SetMarketPlaceImage(config.ImagePublisher, config.ImageOffer, config.ImageSku, config.ImageVersion)
+		err = builder.SetMarketPlaceImage(config.ImagePublisher, config.ImageOffer, config.ImageSku, config.ImageVersion, config.diskCachingType)
+		if err != nil {
+			return nil, err
+		}
 	}
 
 	if config.OSDiskSizeGB > 0 {
-		builder.SetOSDiskSizeGB(config.OSDiskSizeGB)
+		err = builder.SetOSDiskSizeGB(config.OSDiskSizeGB)
+		if err != nil {
+			return nil, err
+		}
+	}
+
+	if len(config.AdditionalDiskSize) > 0 {
+		isManaged := config.CustomManagedImageName != "" || (config.ManagedImageName != "" && config.ImagePublisher != "") || config.SharedGallery.Subscription != ""
+		err = builder.SetAdditionalDisks(config.AdditionalDiskSize, config.tmpDataDiskName, isManaged, config.diskCachingType)
+		if err != nil {
+			return nil, err
+		}
 	}
 
 	if config.customData != "" {
-		builder.SetCustomData(config.customData)
+		err = builder.SetCustomData(config.customData)
+		if err != nil {
+			return nil, err
+		}
+	}
+
+	if config.PlanInfo.PlanName != "" {
+		err = builder.SetPlanInfo(config.PlanInfo.PlanName, config.PlanInfo.PlanProduct, config.PlanInfo.PlanPublisher, config.PlanInfo.PlanPromotionCode)
+		if err != nil {
+			return nil, err
+		}
 	}
 
 	if config.VirtualNetworkName != "" && DefaultPrivateVirtualNetworkWithPublicIp != config.PrivateVirtualNetworkWithPublicIp {
-		builder.SetPrivateVirtualNetworWithPublicIp(
+		err = builder.SetPrivateVirtualNetworkWithPublicIp(
 			config.VirtualNetworkResourceGroupName,
 			config.VirtualNetworkName,
 			config.VirtualNetworkSubnetName)
+		if err != nil {
+			return nil, err
+		}
 	} else if config.VirtualNetworkName != "" {
-		builder.SetVirtualNetwork(
+		err = builder.SetVirtualNetwork(
 			config.VirtualNetworkResourceGroupName,
 			config.VirtualNetworkName,
 			config.VirtualNetworkSubnetName)
+		if err != nil {
+			return nil, err
+		}
 	}
 
-	builder.SetTags(&config.AzureTags)
+	if config.AllowedInboundIpAddresses != nil && len(config.AllowedInboundIpAddresses) >= 1 && config.Comm.Port() != 0 {
+		err = builder.SetNetworkSecurityGroup(config.AllowedInboundIpAddresses, config.Comm.Port())
+		if err != nil {
+			return nil, err
+		}
+	}
+
+	if config.BootDiagSTGAccount != "" {
+		err = builder.SetBootDiagnostics(config.BootDiagSTGAccount)
+		if err != nil {
+			return nil, err
+		}
+	}
+
+	err = builder.SetTags(&config.AzureTags)
+	if err != nil {
+		return nil, err
+	}
+
 	doc, _ := builder.ToJSON()
 	return createDeploymentParameters(*doc, params)
 }

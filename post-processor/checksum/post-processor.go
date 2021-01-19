@@ -1,6 +1,9 @@
+//go:generate mapstructure-to-hcl2 -type Config
+
 package checksum
 
 import (
+	"context"
 	"crypto/md5"
 	"crypto/sha1"
 	"crypto/sha256"
@@ -11,16 +14,16 @@ import (
 	"os"
 	"path/filepath"
 
-	"github.com/hashicorp/packer/common"
-	"github.com/hashicorp/packer/helper/config"
-	"github.com/hashicorp/packer/packer"
-	"github.com/hashicorp/packer/template/interpolate"
+	"github.com/hashicorp/hcl/v2/hcldec"
+	"github.com/hashicorp/packer-plugin-sdk/common"
+	packersdk "github.com/hashicorp/packer-plugin-sdk/packer"
+	"github.com/hashicorp/packer-plugin-sdk/template/config"
+	"github.com/hashicorp/packer-plugin-sdk/template/interpolate"
 )
 
 type Config struct {
 	common.PackerConfig `mapstructure:",squash"`
 
-	Keep          bool     `mapstructure:"keep_input_artifact"`
 	ChecksumTypes []string `mapstructure:"checksum_types"`
 	OutputPath    string   `mapstructure:"output"`
 	ctx           interpolate.Context
@@ -28,12 +31,6 @@ type Config struct {
 
 type PostProcessor struct {
 	config Config
-}
-
-type outputPathTemplate struct {
-	BuildName    string
-	BuilderType  string
-	ChecksumType string
 }
 
 func getHash(t string) hash.Hash {
@@ -55,8 +52,11 @@ func getHash(t string) hash.Hash {
 	return h
 }
 
+func (p *PostProcessor) ConfigSpec() hcldec.ObjectSpec { return p.config.FlatMapstructure().HCL2Spec() }
+
 func (p *PostProcessor) Configure(raws ...interface{}) error {
 	err := config.Decode(&p.config, &config.DecodeOpts{
+		PluginType:         "checksum",
 		Interpolate:        true,
 		InterpolateContext: &p.config.ctx,
 		InterpolateFilter: &interpolate.RenderFilter{
@@ -66,7 +66,7 @@ func (p *PostProcessor) Configure(raws ...interface{}) error {
 	if err != nil {
 		return err
 	}
-	errs := new(packer.MultiError)
+	errs := new(packersdk.MultiError)
 
 	if p.config.ChecksumTypes == nil {
 		p.config.ChecksumTypes = []string{"md5"}
@@ -74,7 +74,7 @@ func (p *PostProcessor) Configure(raws ...interface{}) error {
 
 	for _, k := range p.config.ChecksumTypes {
 		if h := getHash(k); h == nil {
-			errs = packer.MultiErrorAppend(errs,
+			errs = packersdk.MultiErrorAppend(errs,
 				fmt.Errorf("Unrecognized checksum type: %s", k))
 		}
 	}
@@ -84,7 +84,7 @@ func (p *PostProcessor) Configure(raws ...interface{}) error {
 	}
 
 	if err = interpolate.Validate(p.config.OutputPath, &p.config.ctx); err != nil {
-		errs = packer.MultiErrorAppend(
+		errs = packersdk.MultiErrorAppend(
 			errs, fmt.Errorf("Error parsing target template: %s", err))
 	}
 
@@ -95,47 +95,57 @@ func (p *PostProcessor) Configure(raws ...interface{}) error {
 	return nil
 }
 
-func (p *PostProcessor) PostProcess(ui packer.Ui, artifact packer.Artifact) (packer.Artifact, bool, error) {
+func (p *PostProcessor) PostProcess(ctx context.Context, ui packersdk.Ui, artifact packersdk.Artifact) (packersdk.Artifact, bool, bool, error) {
 	files := artifact.Files()
 	var h hash.Hash
 
-	newartifact := NewArtifact(artifact.Files())
-	opTpl := &outputPathTemplate{
-		BuildName:   p.config.PackerBuildName,
-		BuilderType: p.config.PackerBuilderType,
+	var generatedData map[interface{}]interface{}
+	stateData := artifact.State("generated_data")
+	if stateData != nil {
+		// Make sure it's not a nil map so we can assign to it later.
+		generatedData = stateData.(map[interface{}]interface{})
 	}
+	// If stateData has a nil map generatedData will be nil
+	// and we need to make sure it's not
+	if generatedData == nil {
+		generatedData = make(map[interface{}]interface{})
+	}
+	generatedData["BuildName"] = p.config.PackerBuildName
+	generatedData["BuilderType"] = p.config.PackerBuilderType
+
+	newartifact := NewArtifact(artifact.Files())
 
 	for _, ct := range p.config.ChecksumTypes {
 		h = getHash(ct)
-		opTpl.ChecksumType = ct
-		p.config.ctx.Data = &opTpl
+		generatedData["ChecksumType"] = ct
+		p.config.ctx.Data = generatedData
 
 		for _, art := range files {
 			checksumFile, err := interpolate.Render(p.config.OutputPath, &p.config.ctx)
 			if err != nil {
-				return nil, false, err
+				return nil, false, true, err
 			}
 
 			if _, err := os.Stat(checksumFile); err != nil {
 				newartifact.files = append(newartifact.files, checksumFile)
 			}
 			if err := os.MkdirAll(filepath.Dir(checksumFile), os.FileMode(0755)); err != nil {
-				return nil, false, fmt.Errorf("unable to create dir: %s", err.Error())
+				return nil, false, true, fmt.Errorf("unable to create dir: %s", err.Error())
 			}
 			fw, err := os.OpenFile(checksumFile, os.O_WRONLY|os.O_APPEND|os.O_CREATE, os.FileMode(0644))
 			if err != nil {
-				return nil, false, fmt.Errorf("unable to create file %s: %s", checksumFile, err.Error())
+				return nil, false, true, fmt.Errorf("unable to create file %s: %s", checksumFile, err.Error())
 			}
 			fr, err := os.Open(art)
 			if err != nil {
 				fw.Close()
-				return nil, false, fmt.Errorf("unable to open file %s: %s", art, err.Error())
+				return nil, false, true, fmt.Errorf("unable to open file %s: %s", art, err.Error())
 			}
 
 			if _, err = io.Copy(h, fr); err != nil {
 				fr.Close()
 				fw.Close()
-				return nil, false, fmt.Errorf("unable to compute %s hash for %s", ct, art)
+				return nil, false, true, fmt.Errorf("unable to compute %s hash for %s", ct, art)
 			}
 			fr.Close()
 			fw.WriteString(fmt.Sprintf("%x\t%s\n", h.Sum(nil), filepath.Base(art)))
@@ -144,5 +154,7 @@ func (p *PostProcessor) PostProcess(ui packer.Ui, artifact packer.Artifact) (pac
 		}
 	}
 
-	return newartifact, true, nil
+	// sets keep and forceOverride to true because we don't want to accidentally
+	// delete the very artifact we're checksumming.
+	return newartifact, true, true, nil
 }

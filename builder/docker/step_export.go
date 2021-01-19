@@ -6,19 +6,22 @@ import (
 	"os"
 	"path/filepath"
 
-	"github.com/hashicorp/packer/helper/multistep"
-	"github.com/hashicorp/packer/packer"
+	"github.com/hashicorp/packer-plugin-sdk/multistep"
+	packersdk "github.com/hashicorp/packer-plugin-sdk/packer"
 )
 
 // StepExport exports the container to a flat tar file.
 type StepExport struct{}
 
-func (s *StepExport) Run(_ context.Context, state multistep.StateBag) multistep.StepAction {
-	config := state.Get("config").(*Config)
-
-	driver := state.Get("driver").(Driver)
-	containerId := state.Get("container_id").(string)
-	ui := state.Get("ui").(packer.Ui)
+func (s *StepExport) Run(ctx context.Context, state multistep.StateBag) multistep.StepAction {
+	ui := state.Get("ui").(packersdk.Ui)
+	config, ok := state.Get("config").(*Config)
+	if !ok {
+		err := fmt.Errorf("error encountered obtaining docker config")
+		state.Put("error", err)
+		ui.Error(err.Error())
+		return multistep.ActionHalt
+	}
 
 	// We should catch this in validation, but guard anyway
 	if config.ExportPath == "" {
@@ -43,6 +46,9 @@ func (s *StepExport) Run(_ context.Context, state multistep.StateBag) multistep.
 		ui.Error(err.Error())
 		return multistep.ActionHalt
 	}
+
+	driver := state.Get("driver").(Driver)
+	containerId := state.Get("container_id").(string)
 
 	ui.Say("Exporting the container")
 	if err := driver.Export(containerId, f); err != nil {

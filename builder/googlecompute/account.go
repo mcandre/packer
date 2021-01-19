@@ -1,52 +1,47 @@
 package googlecompute
 
 import (
-	"encoding/json"
 	"fmt"
 	"io/ioutil"
 	"os"
-	"strings"
+
+	"golang.org/x/oauth2/google"
+	"golang.org/x/oauth2/jwt"
 )
 
-// accountFile represents the structure of the account file JSON file.
-type AccountFile struct {
-	PrivateKeyId string `json:"private_key_id"`
-	PrivateKey   string `json:"private_key"`
-	ClientEmail  string `json:"client_email"`
-	ClientId     string `json:"client_id"`
+type ServiceAccount struct {
+	jsonKey []byte
+	jwt     *jwt.Config
 }
 
-func parseJSON(result interface{}, text string) error {
-	r := strings.NewReader(text)
-	dec := json.NewDecoder(r)
-	return dec.Decode(result)
-}
-
-func ProcessAccountFile(account_file *AccountFile, text string) error {
+// ProcessAccountFile will return a ServiceAccount for the JSON account file stored in text.
+// Otherwise it will return an error if text does not look or reference a valid account file.
+func ProcessAccountFile(text string) (*ServiceAccount, error) {
 	// Assume text is a JSON string
-	if err := parseJSON(account_file, text); err != nil {
-		// If text was not JSON, assume it is a file path instead
-		if _, err := os.Stat(text); os.IsNotExist(err) {
-			return fmt.Errorf(
-				"account_file path does not exist: %s",
-				text)
-		}
-
-		b, err := ioutil.ReadFile(text)
-		if err != nil {
-			return fmt.Errorf(
-				"Error reading account_file from path '%s': %s",
-				text, err)
-		}
-
-		contents := string(b)
-
-		if err := parseJSON(account_file, contents); err != nil {
-			return fmt.Errorf(
-				"Error parsing account file '%s': %s",
-				contents, err)
-		}
+	if conf, err := google.JWTConfigFromJSON([]byte(text), DriverScopes...); err == nil {
+		return &ServiceAccount{
+			jsonKey: []byte(text),
+			jwt:     conf,
+		}, nil
 	}
 
-	return nil
+	// If text was not JSON, assume it is a file path instead
+	if _, err := os.Stat(text); os.IsNotExist(err) {
+		return nil, fmt.Errorf("account_file path does not exist: %s", text)
+	}
+
+	data, err := ioutil.ReadFile(text)
+	if err != nil {
+		return nil, fmt.Errorf("Error reading account_file from path '%s': %s", text, err)
+	}
+
+	conf, err := google.JWTConfigFromJSON(data, DriverScopes...)
+	if err != nil {
+		return nil, fmt.Errorf("Error parsing account_file: %s", err)
+	}
+
+	return &ServiceAccount{
+		jsonKey: data,
+		jwt:     conf,
+	}, nil
 }

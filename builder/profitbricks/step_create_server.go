@@ -9,15 +9,15 @@ import (
 	"strings"
 	"time"
 
-	"github.com/hashicorp/packer/helper/multistep"
-	"github.com/hashicorp/packer/packer"
+	"github.com/hashicorp/packer-plugin-sdk/multistep"
+	packersdk "github.com/hashicorp/packer-plugin-sdk/packer"
 	"github.com/profitbricks/profitbricks-sdk-go"
 )
 
 type stepCreateServer struct{}
 
-func (s *stepCreateServer) Run(_ context.Context, state multistep.StateBag) multistep.StepAction {
-	ui := state.Get("ui").(packer.Ui)
+func (s *stepCreateServer) Run(ctx context.Context, state multistep.StateBag) multistep.StepAction {
+	ui := state.Get("ui").(packersdk.Ui)
 	c := state.Get("config").(*Config)
 
 	profitbricks.SetAuth(c.PBUsername, c.PBPassword)
@@ -147,6 +147,9 @@ func (s *stepCreateServer) Run(_ context.Context, state multistep.StateBag) mult
 	state.Put("volume_id", server.Entities.Volumes.Items[0].Id)
 
 	server = profitbricks.GetServer(datacenter.Id, server.Id)
+	// instance_id is the generic term used so that users can have access to the
+	// instance id inside of the provisioners, used in step_provision.
+	state.Put("instance_id", server.Id)
 
 	state.Put("server_ip", server.Entities.Nics.Items[0].Properties.Ips[0])
 
@@ -155,7 +158,7 @@ func (s *stepCreateServer) Run(_ context.Context, state multistep.StateBag) mult
 
 func (s *stepCreateServer) Cleanup(state multistep.StateBag) {
 	c := state.Get("config").(*Config)
-	ui := state.Get("ui").(packer.Ui)
+	ui := state.Get("ui").(packersdk.Ui)
 
 	ui.Say("Removing Virtual Data Center...")
 
@@ -237,7 +240,7 @@ func (d *stepCreateServer) getImageId(imageName string, c *Config) string {
 	return ""
 }
 
-func (d *stepCreateServer) getImageAlias(imageAlias string, location string, ui packer.Ui) string {
+func (d *stepCreateServer) getImageAlias(imageAlias string, location string, ui packersdk.Ui) string {
 	if imageAlias == "" {
 		return ""
 	}
@@ -248,7 +251,7 @@ func (d *stepCreateServer) getImageAlias(imageAlias string, location string, ui 
 			if i != "" {
 				alias = i
 			}
-			if alias != "" && strings.ToLower(alias) == strings.ToLower(imageAlias) {
+			if alias != "" && strings.EqualFold(alias, imageAlias) {
 				return alias
 			}
 		}

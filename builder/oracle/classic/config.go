@@ -6,17 +6,19 @@ import (
 	"io/ioutil"
 	"net/url"
 	"os"
+	"regexp"
 	"time"
 
-	"github.com/hashicorp/packer/common"
-	"github.com/hashicorp/packer/helper/communicator"
-	"github.com/hashicorp/packer/helper/config"
-	"github.com/hashicorp/packer/packer"
-	"github.com/hashicorp/packer/template/interpolate"
+	"github.com/hashicorp/packer-plugin-sdk/common"
+	"github.com/hashicorp/packer-plugin-sdk/communicator"
+	packersdk "github.com/hashicorp/packer-plugin-sdk/packer"
+	"github.com/hashicorp/packer-plugin-sdk/template/config"
+	"github.com/hashicorp/packer-plugin-sdk/template/interpolate"
 )
 
 type Config struct {
 	common.PackerConfig `mapstructure:",squash"`
+	PVConfig            `mapstructure:",squash"`
 	Comm                communicator.Config `mapstructure:",squash"`
 	attribs             map[string]interface{}
 
@@ -28,12 +30,13 @@ type Config struct {
 	apiEndpointURL *url.URL
 
 	// Image
-	ImageName       string        `mapstructure:"image_name"`
-	Shape           string        `mapstructure:"shape"`
-	SourceImageList string        `mapstructure:"source_image_list"`
-	SnapshotTimeout time.Duration `mapstructure:"snapshot_timeout"`
-	DestImageList   string        `mapstructure:"dest_image_list"`
-	// Attributes and Atributes file are both optional and mutually exclusive.
+	ImageName            string        `mapstructure:"image_name"`
+	Shape                string        `mapstructure:"shape"`
+	SourceImageList      string        `mapstructure:"source_image_list"`
+	SourceImageListEntry int           `mapstructure:"source_image_list_entry"`
+	SnapshotTimeout      time.Duration `mapstructure:"snapshot_timeout"`
+	DestImageList        string        `mapstructure:"dest_image_list"`
+	// Attributes and Attributes file are both optional and mutually exclusive.
 	Attributes     string `mapstructure:"attributes"`
 	AttributesFile string `mapstructure:"attributes_file"`
 	// Optional; if you don't enter anything, the image list description
@@ -48,8 +51,11 @@ type Config struct {
 	ctx interpolate.Context
 }
 
-func NewConfig(raws ...interface{}) (*Config, error) {
-	c := &Config{}
+func (c *Config) Identifier(s string) string {
+	return fmt.Sprintf("/Compute-%s/%s/%s", c.IdentityDomain, c.Username, s)
+}
+
+func (c *Config) Prepare(raws ...interface{}) error {
 
 	// Decode from template
 	err := config.Decode(c, &config.DecodeOpts{
@@ -57,20 +63,16 @@ func NewConfig(raws ...interface{}) (*Config, error) {
 		InterpolateContext: &c.ctx,
 	}, raws...)
 	if err != nil {
-		return nil, fmt.Errorf("Failed to mapstructure Config: %+v", err)
+		return fmt.Errorf("Failed to mapstructure Config: %+v", err)
 	}
 
 	c.apiEndpointURL, err = url.Parse(c.APIEndpoint)
 	if err != nil {
-		return nil, fmt.Errorf("Error parsing API Endpoint: %s", err)
+		return fmt.Errorf("Error parsing API Endpoint: %s", err)
 	}
 	// Set default source list
 	if c.SSHSourceList == "" {
 		c.SSHSourceList = "seciplist:/oracle/public/public-internet"
-	}
-	// Use default oracle username with sudo privileges
-	if c.Comm.SSHUsername == "" {
-		c.Comm.SSHUsername = "opc"
 	}
 
 	if c.SnapshotTimeout == 0 {
@@ -78,7 +80,7 @@ func NewConfig(raws ...interface{}) (*Config, error) {
 	}
 
 	// Validate that all required fields are present
-	var errs *packer.MultiError
+	var errs *packersdk.MultiError
 	required := map[string]string{
 		"username":          c.Username,
 		"password":          c.Password,
@@ -90,24 +92,35 @@ func NewConfig(raws ...interface{}) (*Config, error) {
 	}
 	for k, v := range required {
 		if v == "" {
-			errs = packer.MultiErrorAppend(errs, fmt.Errorf("You must specify a %s.", k))
+			errs = packersdk.MultiErrorAppend(errs, fmt.Errorf("You must specify a %s.", k))
+		}
+	}
+
+	// Object names can contain only alphanumeric characters, hyphens, underscores, and periods
+	reValidObject := regexp.MustCompile("^[a-zA-Z0-9-._/]+$")
+	var objectValidation = []struct {
+		name  string
+		value string
+	}{
+		{"dest_image_list", c.DestImageList},
+		{"image_name", c.ImageName},
+	}
+	for _, ov := range objectValidation {
+		if !reValidObject.MatchString(ov.value) {
+			errs = packersdk.MultiErrorAppend(errs, fmt.Errorf("%s can contain only alphanumeric characters, hyphens, underscores, and periods.", ov.name))
 		}
 	}
 
 	if c.Attributes != "" && c.AttributesFile != "" {
-		errs = packer.MultiErrorAppend(errs, fmt.Errorf("Only one of user_data or user_data_file can be specified."))
+		errs = packersdk.MultiErrorAppend(errs, fmt.Errorf("Only one of user_data or user_data_file can be specified."))
 	} else if c.AttributesFile != "" {
 		if _, err := os.Stat(c.AttributesFile); err != nil {
-			errs = packer.MultiErrorAppend(errs, fmt.Errorf("attributes_file not found: %s", c.AttributesFile))
+			errs = packersdk.MultiErrorAppend(errs, fmt.Errorf("attributes_file not found: %s", c.AttributesFile))
 		}
 	}
 
 	if es := c.Comm.Prepare(&c.ctx); len(es) > 0 {
-		errs = packer.MultiErrorAppend(errs, es...)
-	}
-
-	if errs != nil && len(errs.Errors) > 0 {
-		return nil, errs
+		errs = packersdk.MultiErrorAppend(errs, es...)
 	}
 
 	// unpack attributes from json into config
@@ -117,23 +130,26 @@ func NewConfig(raws ...interface{}) (*Config, error) {
 		err := json.Unmarshal([]byte(c.Attributes), &data)
 		if err != nil {
 			err = fmt.Errorf("Problem parsing json from attributes: %s", err)
-			packer.MultiErrorAppend(errs, err)
+			errs = packersdk.MultiErrorAppend(errs, err)
 		}
 		c.attribs = data
 	} else if c.AttributesFile != "" {
 		fidata, err := ioutil.ReadFile(c.AttributesFile)
 		if err != nil {
 			err = fmt.Errorf("Problem reading attributes_file: %s", err)
-			packer.MultiErrorAppend(errs, err)
+			errs = packersdk.MultiErrorAppend(errs, err)
 		}
 		err = json.Unmarshal(fidata, &data)
 		c.attribs = data
 		if err != nil {
-			err = fmt.Errorf("Problem parsing json from attrinutes_file: %s", err)
-			packer.MultiErrorAppend(errs, err)
+			err = fmt.Errorf("Problem parsing json from attributes_file: %s", err)
+			errs = packersdk.MultiErrorAppend(errs, err)
 		}
 		c.attribs = data
 	}
 
-	return c, nil
+	if errs != nil && len(errs.Errors) > 0 {
+		return errs
+	}
+	return nil
 }

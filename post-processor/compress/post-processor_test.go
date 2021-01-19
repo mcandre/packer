@@ -2,15 +2,16 @@ package compress
 
 import (
 	"compress/gzip"
+	"context"
 	"fmt"
 	"io/ioutil"
 	"os"
 	"strings"
 	"testing"
 
+	packersdk "github.com/hashicorp/packer-plugin-sdk/packer"
+	"github.com/hashicorp/packer-plugin-sdk/template"
 	"github.com/hashicorp/packer/builder/file"
-	"github.com/hashicorp/packer/packer"
-	"github.com/hashicorp/packer/template"
 )
 
 func TestDetectFilename(t *testing.T) {
@@ -183,10 +184,9 @@ func TestCompressInterpolation(t *testing.T) {
 
 // Test Helpers
 
-func setup(t *testing.T) (packer.Ui, packer.Artifact, error) {
+func setup(t *testing.T) (packersdk.Ui, packersdk.Artifact, error) {
 	// Create fake UI and Cache
-	ui := packer.TestUi(t)
-	cache := &packer.FileCache{CacheDir: os.TempDir()}
+	ui := packersdk.TestUi(t)
 
 	// Create config for file builder
 	const fileConfig = `{"builders":[{"type":"file","target":"package.txt","content":"Hello world!"}]}`
@@ -197,7 +197,7 @@ func setup(t *testing.T) (packer.Ui, packer.Artifact, error) {
 
 	// Prepare the file builder
 	builder := file.Builder{}
-	warnings, err := builder.Prepare(tpl.Builders["file"].Config)
+	_, warnings, err := builder.Prepare(tpl.Builders["file"].Config)
 	if len(warnings) > 0 {
 		for _, warn := range warnings {
 			return nil, nil, fmt.Errorf("Configuration warning: %s", warn)
@@ -208,7 +208,7 @@ func setup(t *testing.T) (packer.Ui, packer.Artifact, error) {
 	}
 
 	// Run the file builder
-	artifact, err := builder.Run(ui, nil, cache)
+	artifact, err := builder.Run(context.Background(), ui, nil)
 	if err != nil {
 		return nil, nil, fmt.Errorf("Failed to build artifact: %s", err)
 	}
@@ -216,7 +216,7 @@ func setup(t *testing.T) (packer.Ui, packer.Artifact, error) {
 	return ui, artifact, err
 }
 
-func testArchive(t *testing.T, config string) packer.Artifact {
+func testArchive(t *testing.T, config string) packersdk.Artifact {
 	ui, artifact, err := setup(t)
 	if err != nil {
 		t.Fatalf("Error bootstrapping test: %s", err)
@@ -239,7 +239,7 @@ func testArchive(t *testing.T, config string) packer.Artifact {
 	compressor.config.PackerBuildName = "vanilla"
 	compressor.config.PackerBuilderType = "file"
 
-	artifactOut, _, err := compressor.PostProcess(ui, artifact)
+	artifactOut, _, _, err := compressor.PostProcess(context.Background(), ui, artifact)
 	if err != nil {
 		t.Fatalf("Failed to compress artifact: %s", err)
 	}

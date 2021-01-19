@@ -6,8 +6,8 @@ import (
 	"fmt"
 	"time"
 
-	"github.com/hashicorp/packer/helper/multistep"
-	"github.com/hashicorp/packer/packer"
+	"github.com/hashicorp/packer-plugin-sdk/multistep"
+	packersdk "github.com/hashicorp/packer-plugin-sdk/packer"
 )
 
 // StepTeardownInstance represents a Packer build step that tears down GCE
@@ -17,10 +17,10 @@ type StepTeardownInstance struct {
 }
 
 // Run executes the Packer build step that tears down a GCE instance.
-func (s *StepTeardownInstance) Run(_ context.Context, state multistep.StateBag) multistep.StepAction {
+func (s *StepTeardownInstance) Run(ctx context.Context, state multistep.StateBag) multistep.StepAction {
 	config := state.Get("config").(*Config)
 	driver := state.Get("driver").(Driver)
-	ui := state.Get("ui").(packer.Ui)
+	ui := state.Get("ui").(packersdk.Ui)
 
 	name := config.InstanceName
 	if name == "" {
@@ -34,7 +34,7 @@ func (s *StepTeardownInstance) Run(_ context.Context, state multistep.StateBag) 
 	if err == nil {
 		select {
 		case err = <-errCh:
-		case <-time.After(config.stateTimeout):
+		case <-time.After(config.StateTimeout):
 			err = errors.New("time out while waiting for instance to delete")
 		}
 	}
@@ -57,14 +57,14 @@ func (s *StepTeardownInstance) Run(_ context.Context, state multistep.StateBag) 
 func (s *StepTeardownInstance) Cleanup(state multistep.StateBag) {
 	config := state.Get("config").(*Config)
 	driver := state.Get("driver").(Driver)
-	ui := state.Get("ui").(packer.Ui)
+	ui := state.Get("ui").(packersdk.Ui)
 
 	ui.Say("Deleting disk...")
 	errCh, err := driver.DeleteDisk(config.Zone, config.DiskName)
 	if err == nil {
 		select {
 		case err = <-errCh:
-		case <-time.After(config.stateTimeout):
+		case <-time.After(config.StateTimeout):
 			err = errors.New("time out while waiting for disk to delete")
 		}
 	}

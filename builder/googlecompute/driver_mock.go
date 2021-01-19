@@ -1,22 +1,29 @@
 package googlecompute
 
-import "fmt"
+import (
+	"fmt"
+
+	compute "google.golang.org/api/compute/v1"
+	oslogin "google.golang.org/api/oslogin/v1"
+)
 
 // DriverMock is a Driver implementation that is a mocked out so that
 // it can be used for tests.
 type DriverMock struct {
-	CreateImageName            string
-	CreateImageDesc            string
-	CreateImageFamily          string
-	CreateImageLabels          map[string]string
-	CreateImageLicenses        []string
-	CreateImageZone            string
-	CreateImageDisk            string
-	CreateImageResultProjectId string
-	CreateImageResultSelfLink  string
-	CreateImageResultSizeGb    int64
-	CreateImageErrCh           <-chan error
-	CreateImageResultCh        <-chan *Image
+	CreateImageName             string
+	CreateImageDesc             string
+	CreateImageFamily           string
+	CreateImageEncryptionKey    *compute.CustomerEncryptionKey
+	CreateImageLabels           map[string]string
+	CreateImageLicenses         []string
+	CreateImageStorageLocations []string
+	CreateImageZone             string
+	CreateImageDisk             string
+	CreateImageResultProjectId  string
+	CreateImageResultSelfLink   string
+	CreateImageResultSizeGb     int64
+	CreateImageErrCh            <-chan error
+	CreateImageResultCh         <-chan *Image
 
 	DeleteImageName  string
 	DeleteImageErrCh <-chan error
@@ -31,10 +38,11 @@ type DriverMock struct {
 	DeleteDiskErrCh <-chan error
 	DeleteDiskErr   error
 
-	GetImageName       string
-	GetImageFromFamily bool
-	GetImageResult     *Image
-	GetImageErr        error
+	GetImageName           string
+	GetImageSourceProjects []string
+	GetImageFromFamily     bool
+	GetImageResult         *Image
+	GetImageErr            error
 
 	GetImageFromProjectProject    string
 	GetImageFromProjectName       string
@@ -80,16 +88,24 @@ type DriverMock struct {
 	WaitForInstanceZone  string
 	WaitForInstanceName  string
 	WaitForInstanceErrCh <-chan error
+
+	AddToInstanceMetadataZone    string
+	AddToInstanceMetadataName    string
+	AddToInstanceMetadataKVPairs map[string]string
+	AddToInstanceMetadataErrCh   <-chan error
+	AddToInstanceMetadataErr     error
 }
 
-func (d *DriverMock) CreateImage(name, description, family, zone, disk string, image_labels map[string]string, image_licenses []string) (<-chan *Image, <-chan error) {
+func (d *DriverMock) CreateImage(name, description, family, zone, disk string, image_labels map[string]string, image_licenses []string, image_encryption_key *compute.CustomerEncryptionKey, imageStorageLocations []string) (<-chan *Image, <-chan error) {
 	d.CreateImageName = name
 	d.CreateImageDesc = description
 	d.CreateImageFamily = family
 	d.CreateImageLabels = image_labels
 	d.CreateImageLicenses = image_licenses
+	d.CreateImageStorageLocations = imageStorageLocations
 	d.CreateImageZone = zone
 	d.CreateImageDisk = disk
+	d.CreateImageEncryptionKey = image_encryption_key
 	if d.CreateImageResultProjectId == "" {
 		d.CreateImageResultProjectId = "test"
 	}
@@ -172,6 +188,12 @@ func (d *DriverMock) GetImage(name string, fromFamily bool) (*Image, error) {
 	d.GetImageName = name
 	d.GetImageFromFamily = fromFamily
 	return d.GetImageResult, d.GetImageErr
+}
+func (d *DriverMock) GetImageFromProjects(projects []string, name string, fromFamily bool) (*Image, error) {
+	d.GetImageSourceProjects = projects
+	d.GetImageFromProjectName = name
+	d.GetImageFromProjectFromFamily = fromFamily
+	return d.GetImageFromProjectResult, d.GetImageFromProjectErr
 }
 
 func (d *DriverMock) GetImageFromProject(project, name string, fromFamily bool) (*Image, error) {
@@ -259,4 +281,30 @@ func (d *DriverMock) CreateOrResetWindowsPassword(instance, zone string, c *Wind
 	}
 
 	return resultCh, d.CreateOrResetWindowsPasswordErr
+}
+
+func (d *DriverMock) ImportOSLoginSSHKey(user, key string) (*oslogin.LoginProfile, error) {
+	account := oslogin.PosixAccount{Primary: true, Username: "testing_packer_io"}
+	profile := oslogin.LoginProfile{
+		PosixAccounts: []*oslogin.PosixAccount{&account},
+	}
+	return &profile, nil
+}
+
+func (d *DriverMock) DeleteOSLoginSSHKey(user, fingerprint string) error {
+	return nil
+}
+
+func (d *DriverMock) AddToInstanceMetadata(zone string, name string, metadata map[string]string) error {
+	d.AddToInstanceMetadataZone = zone
+	d.AddToInstanceMetadataName = name
+	d.AddToInstanceMetadataKVPairs = metadata
+
+	resultCh := d.AddToInstanceMetadataErrCh
+	if resultCh == nil {
+		ch := make(chan error)
+		close(ch)
+	}
+
+	return nil
 }

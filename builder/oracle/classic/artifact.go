@@ -2,8 +2,6 @@ package classic
 
 import (
 	"fmt"
-
-	"github.com/hashicorp/go-oracle-terraform/compute"
 )
 
 // Artifact is an artifact implementation that contains Image List
@@ -12,7 +10,10 @@ type Artifact struct {
 	MachineImageName string
 	MachineImageFile string
 	ImageListVersion int
-	driver           *compute.ComputeClient
+
+	// StateData should store data such as GeneratedData
+	// to be shared with post-processors
+	StateData map[string]interface{}
 }
 
 // BuilderId uniquely identifies the builder.
@@ -39,7 +40,7 @@ func (a *Artifact) String() string {
 }
 
 func (a *Artifact) State(name string) interface{} {
-	return nil
+	return a.StateData[name]
 }
 
 // Destroy deletes the custom image associated with the artifact.

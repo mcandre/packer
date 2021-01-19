@@ -1,3 +1,5 @@
+//go:generate mapstructure-to-hcl2 -type Config
+
 // This package implements a provisioner for Packer that uses
 // Chef to provision the remote machine, specifically with chef-solo (that is,
 // without a Chef server).
@@ -5,6 +7,7 @@ package chefsolo
 
 import (
 	"bytes"
+	"context"
 	"encoding/json"
 	"fmt"
 	"io/ioutil"
@@ -12,11 +15,12 @@ import (
 	"path/filepath"
 	"strings"
 
-	"github.com/hashicorp/packer/common"
-	"github.com/hashicorp/packer/helper/config"
-	"github.com/hashicorp/packer/packer"
-	"github.com/hashicorp/packer/provisioner"
-	"github.com/hashicorp/packer/template/interpolate"
+	"github.com/hashicorp/hcl/v2/hcldec"
+	"github.com/hashicorp/packer-plugin-sdk/common"
+	"github.com/hashicorp/packer-plugin-sdk/guestexec"
+	packersdk "github.com/hashicorp/packer-plugin-sdk/packer"
+	"github.com/hashicorp/packer-plugin-sdk/template/config"
+	"github.com/hashicorp/packer-plugin-sdk/template/interpolate"
 )
 
 type guestOSTypeConfig struct {
@@ -26,12 +30,12 @@ type guestOSTypeConfig struct {
 }
 
 var guestOSTypeConfigs = map[string]guestOSTypeConfig{
-	provisioner.UnixOSType: {
+	guestexec.UnixOSType: {
 		executeCommand: "{{if .Sudo}}sudo {{end}}chef-solo --no-color -c {{.ConfigPath}} -j {{.JsonPath}}",
 		installCommand: "curl -L https://omnitruck.chef.io/install.sh | {{if .Sudo}}sudo {{end}}bash -s --{{if .Version}} -v {{.Version}}{{end}}",
 		stagingDir:     "/tmp/packer-chef-solo",
 	},
-	provisioner.WindowsOSType: {
+	guestexec.WindowsOSType: {
 		executeCommand: "c:/opscode/chef/bin/chef-solo.bat --no-color -c {{.ConfigPath}} -j {{.JsonPath}}",
 		installCommand: "powershell.exe -Command \". { iwr -useb https://omnitruck.chef.io/install.ps1 } | iex; Install-Project{{if .Version}} -version {{.Version}}{{end}}\"",
 		stagingDir:     "C:/Windows/Temp/packer-chef-solo",
@@ -42,6 +46,7 @@ type Config struct {
 	common.PackerConfig `mapstructure:",squash"`
 
 	ChefEnvironment            string   `mapstructure:"chef_environment"`
+	ChefLicense                string   `mapstructure:"chef_license"`
 	ConfigTemplate             string   `mapstructure:"config_template"`
 	CookbookPaths              []string `mapstructure:"cookbook_paths"`
 	RolesPath                  string   `mapstructure:"roles_path"`
@@ -65,7 +70,7 @@ type Config struct {
 type Provisioner struct {
 	config            Config
 	guestOSTypeConfig guestOSTypeConfig
-	guestCommands     *provisioner.GuestCommands
+	guestCommands     *guestexec.GuestCommands
 }
 
 type ConfigTemplate struct {
@@ -75,6 +80,7 @@ type ConfigTemplate struct {
 	RolesPath                  string
 	EnvironmentsPath           string
 	ChefEnvironment            string
+	ChefLicense                string
 
 	// Templates don't support boolean statements until Go 1.2. In the
 	// mean time, we do this.
@@ -96,8 +102,11 @@ type InstallChefTemplate struct {
 	Version string
 }
 
+func (p *Provisioner) ConfigSpec() hcldec.ObjectSpec { return p.config.FlatMapstructure().HCL2Spec() }
+
 func (p *Provisioner) Prepare(raws ...interface{}) error {
 	err := config.Decode(&p.config, &config.DecodeOpts{
+		PluginType:         "chef-solo",
 		Interpolate:        true,
 		InterpolateContext: &p.config.ctx,
 		InterpolateFilter: &interpolate.RenderFilter{
@@ -112,7 +121,7 @@ func (p *Provisioner) Prepare(raws ...interface{}) error {
 	}
 
 	if p.config.GuestOSType == "" {
-		p.config.GuestOSType = provisioner.DefaultOSType
+		p.config.GuestOSType = guestexec.DefaultOSType
 	}
 	p.config.GuestOSType = strings.ToLower(p.config.GuestOSType)
 
@@ -122,7 +131,7 @@ func (p *Provisioner) Prepare(raws ...interface{}) error {
 		return fmt.Errorf("Invalid guest_os_type: \"%s\"", p.config.GuestOSType)
 	}
 
-	p.guestCommands, err = provisioner.NewGuestCommands(p.config.GuestOSType, !p.config.PreventSudo)
+	p.guestCommands, err = guestexec.NewGuestCommands(p.config.GuestOSType, !p.config.PreventSudo)
 	if err != nil {
 		return fmt.Errorf("Invalid guest_os_type: \"%s\"", p.config.GuestOSType)
 	}
@@ -143,14 +152,20 @@ func (p *Provisioner) Prepare(raws ...interface{}) error {
 		p.config.StagingDir = p.guestOSTypeConfig.stagingDir
 	}
 
-	var errs *packer.MultiError
+	if p.config.SkipInstall == false && p.config.InstallCommand == p.guestOSTypeConfig.installCommand {
+		if p.config.ChefLicense == "" {
+			p.config.ChefLicense = "accept-silent"
+		}
+	}
+
+	var errs *packersdk.MultiError
 	if p.config.ConfigTemplate != "" {
 		fi, err := os.Stat(p.config.ConfigTemplate)
 		if err != nil {
-			errs = packer.MultiErrorAppend(
+			errs = packersdk.MultiErrorAppend(
 				errs, fmt.Errorf("Bad config template path: %s", err))
 		} else if fi.IsDir() {
-			errs = packer.MultiErrorAppend(
+			errs = packersdk.MultiErrorAppend(
 				errs, fmt.Errorf("Config template path must be a file: %s", err))
 		}
 	}
@@ -159,7 +174,7 @@ func (p *Provisioner) Prepare(raws ...interface{}) error {
 		pFileInfo, err := os.Stat(path)
 
 		if err != nil || !pFileInfo.IsDir() {
-			errs = packer.MultiErrorAppend(
+			errs = packersdk.MultiErrorAppend(
 				errs, fmt.Errorf("Bad cookbook path '%s': %s", path, err))
 		}
 	}
@@ -168,7 +183,7 @@ func (p *Provisioner) Prepare(raws ...interface{}) error {
 		pFileInfo, err := os.Stat(p.config.RolesPath)
 
 		if err != nil || !pFileInfo.IsDir() {
-			errs = packer.MultiErrorAppend(
+			errs = packersdk.MultiErrorAppend(
 				errs, fmt.Errorf("Bad roles path '%s': %s", p.config.RolesPath, err))
 		}
 	}
@@ -177,7 +192,7 @@ func (p *Provisioner) Prepare(raws ...interface{}) error {
 		pFileInfo, err := os.Stat(p.config.DataBagsPath)
 
 		if err != nil || !pFileInfo.IsDir() {
-			errs = packer.MultiErrorAppend(
+			errs = packersdk.MultiErrorAppend(
 				errs, fmt.Errorf("Bad data bags path '%s': %s", p.config.DataBagsPath, err))
 		}
 	}
@@ -186,7 +201,7 @@ func (p *Provisioner) Prepare(raws ...interface{}) error {
 		pFileInfo, err := os.Stat(p.config.EncryptedDataBagSecretPath)
 
 		if err != nil || pFileInfo.IsDir() {
-			errs = packer.MultiErrorAppend(
+			errs = packersdk.MultiErrorAppend(
 				errs, fmt.Errorf("Bad encrypted data bag secret '%s': %s", p.config.EncryptedDataBagSecretPath, err))
 		}
 	}
@@ -195,7 +210,7 @@ func (p *Provisioner) Prepare(raws ...interface{}) error {
 		pFileInfo, err := os.Stat(p.config.EnvironmentsPath)
 
 		if err != nil || !pFileInfo.IsDir() {
-			errs = packer.MultiErrorAppend(
+			errs = packersdk.MultiErrorAppend(
 				errs, fmt.Errorf("Bad environments path '%s': %s", p.config.EnvironmentsPath, err))
 		}
 	}
@@ -204,7 +219,7 @@ func (p *Provisioner) Prepare(raws ...interface{}) error {
 	for k, v := range p.config.Json {
 		p.config.Json[k], err = p.deepJsonFix(k, v)
 		if err != nil {
-			errs = packer.MultiErrorAppend(
+			errs = packersdk.MultiErrorAppend(
 				errs, fmt.Errorf("Error processing JSON: %s", err))
 			jsonValid = false
 		}
@@ -215,7 +230,7 @@ func (p *Provisioner) Prepare(raws ...interface{}) error {
 		// Do this early so that we can validate and show errors.
 		p.config.Json, err = p.processJsonUserVars()
 		if err != nil {
-			errs = packer.MultiErrorAppend(
+			errs = packersdk.MultiErrorAppend(
 				errs, fmt.Errorf("Error processing user variables in JSON: %s", err))
 		}
 	}
@@ -227,7 +242,7 @@ func (p *Provisioner) Prepare(raws ...interface{}) error {
 	return nil
 }
 
-func (p *Provisioner) Provision(ui packer.Ui, comm packer.Communicator) error {
+func (p *Provisioner) Provision(ctx context.Context, ui packersdk.Ui, comm packersdk.Communicator, _ map[string]interface{}) error {
 	ui.Say("Provisioning with chef-solo")
 
 	if !p.config.SkipInstall {
@@ -282,7 +297,7 @@ func (p *Provisioner) Provision(ui packer.Ui, comm packer.Communicator) error {
 		}
 	}
 
-	configPath, err := p.createConfig(ui, comm, cookbookPaths, rolesPath, dataBagsPath, encryptedDataBagSecretPath, environmentsPath, p.config.ChefEnvironment)
+	configPath, err := p.createConfig(ui, comm, cookbookPaths, rolesPath, dataBagsPath, encryptedDataBagSecretPath, environmentsPath, p.config.ChefEnvironment, p.config.ChefLicense)
 	if err != nil {
 		return fmt.Errorf("Error creating Chef config file: %s", err)
 	}
@@ -299,13 +314,7 @@ func (p *Provisioner) Provision(ui packer.Ui, comm packer.Communicator) error {
 	return nil
 }
 
-func (p *Provisioner) Cancel() {
-	// Just hard quit. It isn't a big deal if what we're doing keeps
-	// running on the other side.
-	os.Exit(0)
-}
-
-func (p *Provisioner) uploadDirectory(ui packer.Ui, comm packer.Communicator, dst string, src string) error {
+func (p *Provisioner) uploadDirectory(ui packersdk.Ui, comm packersdk.Communicator, dst string, src string) error {
 	if err := p.createDir(ui, comm, dst); err != nil {
 		return err
 	}
@@ -319,7 +328,7 @@ func (p *Provisioner) uploadDirectory(ui packer.Ui, comm packer.Communicator, ds
 	return comm.UploadDir(dst, src, nil)
 }
 
-func (p *Provisioner) uploadFile(ui packer.Ui, comm packer.Communicator, dst string, src string) error {
+func (p *Provisioner) uploadFile(ui packersdk.Ui, comm packersdk.Communicator, dst string, src string) error {
 	f, err := os.Open(src)
 	if err != nil {
 		return err
@@ -329,7 +338,7 @@ func (p *Provisioner) uploadFile(ui packer.Ui, comm packer.Communicator, dst str
 	return comm.Upload(dst, f, nil)
 }
 
-func (p *Provisioner) createConfig(ui packer.Ui, comm packer.Communicator, localCookbooks []string, rolesPath string, dataBagsPath string, encryptedDataBagSecretPath string, environmentsPath string, chefEnvironment string) (string, error) {
+func (p *Provisioner) createConfig(ui packersdk.Ui, comm packersdk.Communicator, localCookbooks []string, rolesPath string, dataBagsPath string, encryptedDataBagSecretPath string, environmentsPath string, chefEnvironment string, chefLicense string) (string, error) {
 	ui.Message("Creating configuration file 'solo.rb'")
 
 	cookbook_paths := make([]string, len(p.config.RemoteCookbookPaths)+len(localCookbooks))
@@ -370,6 +379,7 @@ func (p *Provisioner) createConfig(ui packer.Ui, comm packer.Communicator, local
 		HasEncryptedDataBagSecretPath: encryptedDataBagSecretPath != "",
 		HasEnvironmentsPath:           environmentsPath != "",
 		ChefEnvironment:               chefEnvironment,
+		ChefLicense:                   chefLicense,
 	}
 	configString, err := interpolate.Render(tpl, &p.config.ctx)
 	if err != nil {
@@ -384,7 +394,7 @@ func (p *Provisioner) createConfig(ui packer.Ui, comm packer.Communicator, local
 	return remotePath, nil
 }
 
-func (p *Provisioner) createJson(ui packer.Ui, comm packer.Communicator) (string, error) {
+func (p *Provisioner) createJson(ui packersdk.Ui, comm packersdk.Communicator) (string, error) {
 	ui.Message("Creating JSON attribute file")
 
 	jsonData := make(map[string]interface{})
@@ -413,30 +423,31 @@ func (p *Provisioner) createJson(ui packer.Ui, comm packer.Communicator) (string
 	return remotePath, nil
 }
 
-func (p *Provisioner) createDir(ui packer.Ui, comm packer.Communicator, dir string) error {
+func (p *Provisioner) createDir(ui packersdk.Ui, comm packersdk.Communicator, dir string) error {
 	ui.Message(fmt.Sprintf("Creating directory: %s", dir))
+	ctx := context.TODO()
 
-	cmd := &packer.RemoteCmd{Command: p.guestCommands.CreateDir(dir)}
-	if err := cmd.StartWithUi(comm, ui); err != nil {
+	cmd := &packersdk.RemoteCmd{Command: p.guestCommands.CreateDir(dir)}
+	if err := cmd.RunWithUi(ctx, comm, ui); err != nil {
 		return err
 	}
-	if cmd.ExitStatus != 0 {
+	if cmd.ExitStatus() != 0 {
 		return fmt.Errorf("Non-zero exit status. See output above for more info.")
 	}
 
 	// Chmod the directory to 0777 just so that we can access it as our user
-	cmd = &packer.RemoteCmd{Command: p.guestCommands.Chmod(dir, "0777")}
-	if err := cmd.StartWithUi(comm, ui); err != nil {
+	cmd = &packersdk.RemoteCmd{Command: p.guestCommands.Chmod(dir, "0777")}
+	if err := cmd.RunWithUi(ctx, comm, ui); err != nil {
 		return err
 	}
-	if cmd.ExitStatus != 0 {
+	if cmd.ExitStatus() != 0 {
 		return fmt.Errorf("Non-zero exit status. See output above for more info.")
 	}
 
 	return nil
 }
 
-func (p *Provisioner) executeChef(ui packer.Ui, comm packer.Communicator, config string, json string) error {
+func (p *Provisioner) executeChef(ui packersdk.Ui, comm packersdk.Communicator, config string, json string) error {
 	p.config.ctx.Data = &ExecuteTemplate{
 		ConfigPath: config,
 		JsonPath:   json,
@@ -449,23 +460,24 @@ func (p *Provisioner) executeChef(ui packer.Ui, comm packer.Communicator, config
 
 	ui.Message(fmt.Sprintf("Executing Chef: %s", command))
 
-	cmd := &packer.RemoteCmd{
+	cmd := &packersdk.RemoteCmd{
 		Command: command,
 	}
-
-	if err := cmd.StartWithUi(comm, ui); err != nil {
+	ctx := context.TODO()
+	if err := cmd.RunWithUi(ctx, comm, ui); err != nil {
 		return err
 	}
 
-	if cmd.ExitStatus != 0 {
-		return fmt.Errorf("Non-zero exit status: %d", cmd.ExitStatus)
+	if cmd.ExitStatus() != 0 {
+		return fmt.Errorf("Non-zero exit status: %d", cmd.ExitStatus())
 	}
 
 	return nil
 }
 
-func (p *Provisioner) installChef(ui packer.Ui, comm packer.Communicator, version string) error {
+func (p *Provisioner) installChef(ui packersdk.Ui, comm packersdk.Communicator, version string) error {
 	ui.Message("Installing Chef...")
+	ctx := context.TODO()
 
 	p.config.ctx.Data = &InstallChefTemplate{
 		Sudo:    !p.config.PreventSudo,
@@ -476,14 +488,14 @@ func (p *Provisioner) installChef(ui packer.Ui, comm packer.Communicator, versio
 		return err
 	}
 
-	cmd := &packer.RemoteCmd{Command: command}
-	if err := cmd.StartWithUi(comm, ui); err != nil {
+	cmd := &packersdk.RemoteCmd{Command: command}
+	if err := cmd.RunWithUi(ctx, comm, ui); err != nil {
 		return err
 	}
 
-	if cmd.ExitStatus != 0 {
+	if cmd.ExitStatus() != 0 {
 		return fmt.Errorf(
-			"Install script exited with non-zero exit status %d", cmd.ExitStatus)
+			"Install script exited with non-zero exit status %d", cmd.ExitStatus())
 	}
 
 	return nil
@@ -572,6 +584,7 @@ func (p *Provisioner) processJsonUserVars() (map[string]interface{}, error) {
 }
 
 var DefaultConfigTemplate = `
+chef_license 		"{{.ChefLicense}}"
 cookbook_path 	[{{.CookbookPaths}}]
 {{if .HasRolesPath}}
 role_path		"{{.RolesPath}}"

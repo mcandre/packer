@@ -5,9 +5,9 @@ import (
 	"fmt"
 	"time"
 
+	"github.com/hashicorp/packer-plugin-sdk/multistep"
+	packersdk "github.com/hashicorp/packer-plugin-sdk/packer"
 	"github.com/hashicorp/packer/builder/azure/common/constants"
-	"github.com/hashicorp/packer/helper/multistep"
-	"github.com/hashicorp/packer/packer"
 )
 
 type StepGetCertificate struct {
@@ -18,7 +18,7 @@ type StepGetCertificate struct {
 	pause  func()
 }
 
-func NewStepGetCertificate(client *AzureClient, ui packer.Ui) *StepGetCertificate {
+func NewStepGetCertificate(client *AzureClient, ui packersdk.Ui) *StepGetCertificate {
 	var step = &StepGetCertificate{
 		client: client,
 		say:    func(message string) { ui.Say(message) },
@@ -40,7 +40,7 @@ func (s *StepGetCertificate) getCertificateUrl(keyVaultName string, secretName s
 	return *secret.ID, err
 }
 
-func (s *StepGetCertificate) Run(_ context.Context, state multistep.StateBag) multistep.StepAction {
+func (s *StepGetCertificate) Run(ctx context.Context, state multistep.StateBag) multistep.StepAction {
 	s.say("Getting the certificate's URL ...")
 
 	var keyVaultName = state.Get(constants.ArmKeyVaultName).(string)

@@ -5,8 +5,8 @@ import (
 	"fmt"
 	"time"
 
-	"github.com/hashicorp/packer/helper/multistep"
-	"github.com/hashicorp/packer/packer"
+	"github.com/hashicorp/packer-plugin-sdk/multistep"
+	packersdk "github.com/hashicorp/packer-plugin-sdk/packer"
 )
 
 // StepCreateImageFromMachine creates an image with the specified attributes
@@ -14,16 +14,16 @@ import (
 // The machine must be in the "stopped" state prior to this step being run.
 type StepCreateImageFromMachine struct{}
 
-func (s *StepCreateImageFromMachine) Run(_ context.Context, state multistep.StateBag) multistep.StepAction {
-	config := state.Get("config").(Config)
+func (s *StepCreateImageFromMachine) Run(ctx context.Context, state multistep.StateBag) multistep.StepAction {
+	config := state.Get("config").(*Config)
 	driver := state.Get("driver").(Driver)
-	ui := state.Get("ui").(packer.Ui)
+	ui := state.Get("ui").(packersdk.Ui)
 
 	machineId := state.Get("machine").(string)
 
 	ui.Say("Creating image from source machine...")
 
-	imageId, err := driver.CreateImageFromMachine(machineId, config)
+	imageId, err := driver.CreateImageFromMachine(machineId, *config)
 	if err != nil {
 		state.Put("error", fmt.Errorf("Problem creating image from machine: %s", err))
 		return multistep.ActionHalt

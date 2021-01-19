@@ -4,8 +4,8 @@ import (
 	"context"
 	"fmt"
 
-	"github.com/hashicorp/packer/helper/multistep"
-	"github.com/hashicorp/packer/packer"
+	"github.com/hashicorp/packer-plugin-sdk/multistep"
+	packersdk "github.com/hashicorp/packer-plugin-sdk/packer"
 )
 
 // StepCompactDisk is a step that removes all empty blocks from expanding
@@ -14,7 +14,7 @@ import (
 // Uses:
 //   driver Driver
 //   vmName string
-//   ui     packer.Ui
+//   ui     packersdk.Ui
 //
 // Produces:
 //   <nothing>
@@ -23,10 +23,10 @@ type StepCompactDisk struct {
 }
 
 // Run runs the compaction of the virtual disk attached to the VM.
-func (s *StepCompactDisk) Run(_ context.Context, state multistep.StateBag) multistep.StepAction {
+func (s *StepCompactDisk) Run(ctx context.Context, state multistep.StateBag) multistep.StepAction {
 	driver := state.Get("driver").(Driver)
 	vmName := state.Get("vmName").(string)
-	ui := state.Get("ui").(packer.Ui)
+	ui := state.Get("ui").(packersdk.Ui)
 
 	if s.Skip {
 		ui.Say("Skipping disk compaction step...")

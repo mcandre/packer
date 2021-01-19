@@ -1,6 +1,7 @@
 package lxd
 
 import (
+	"context"
 	"fmt"
 	"io"
 	"log"
@@ -9,7 +10,7 @@ import (
 	"path/filepath"
 	"syscall"
 
-	"github.com/hashicorp/packer/packer"
+	packersdk "github.com/hashicorp/packer-plugin-sdk/packer"
 )
 
 type Communicator struct {
@@ -17,7 +18,7 @@ type Communicator struct {
 	CmdWrapper    CommandWrapper
 }
 
-func (c *Communicator) Start(cmd *packer.RemoteCmd) error {
+func (c *Communicator) Start(ctx context.Context, cmd *packersdk.RemoteCmd) error {
 	localCmd, err := c.Execute(cmd.Command)
 
 	if err != nil {
@@ -55,11 +56,13 @@ func (c *Communicator) Start(cmd *packer.RemoteCmd) error {
 }
 
 func (c *Communicator) Upload(dst string, r io.Reader, fi *os.FileInfo) error {
+	ctx := context.TODO()
+
 	fileDestination := filepath.Join(c.ContainerName, dst)
 	// find out if the place we are pushing to is a directory
 	testDirectoryCommand := fmt.Sprintf(`test -d "%s"`, dst)
-	cmd := &packer.RemoteCmd{Command: testDirectoryCommand}
-	err := c.Start(cmd)
+	cmd := &packersdk.RemoteCmd{Command: testDirectoryCommand}
+	err := c.Start(ctx, cmd)
 
 	if err != nil {
 		log.Printf("Unable to check whether remote path is a dir: %s", err)
@@ -67,7 +70,7 @@ func (c *Communicator) Upload(dst string, r io.Reader, fi *os.FileInfo) error {
 	}
 	cmd.Wait()
 
-	if cmd.ExitStatus == 0 {
+	if cmd.ExitStatus() == 0 {
 		log.Printf("path is a directory; copying file into directory.")
 		fileDestination = filepath.Join(c.ContainerName, dst, (*fi).Name())
 	}
@@ -85,42 +88,21 @@ func (c *Communicator) Upload(dst string, r io.Reader, fi *os.FileInfo) error {
 }
 
 func (c *Communicator) UploadDir(dst string, src string, exclude []string) error {
-	// NOTE:lxc file push doesn't yet support directory uploads.
-	// As a work around, we tar up the folder, upload it as a file, then extract it
-
-	// Don't use 'z' flag as compressing may take longer and the transfer is likely local.
-	// If this isn't the case, it is possible for the user to compress in another step then transfer.
-	// It wouldn't be possibe to disable compression, without exposing this option.
-	tar, err := c.CmdWrapper(fmt.Sprintf("tar -cf - -C %s .", src))
-	if err != nil {
-		return err
-	}
-
-	cp, err := c.CmdWrapper(fmt.Sprintf("lxc exec %s -- tar -xf - -C %s", c.ContainerName, dst))
-	if err != nil {
-		return err
-	}
-
-	tarCmd := ShellCommand(tar)
-	cpCmd := ShellCommand(cp)
-
-	cpCmd.Stdin, _ = tarCmd.StdoutPipe()
-	log.Printf("Starting tar command: %s", tar)
-	err = tarCmd.Start()
-	if err != nil {
-		return err
-	}
-
-	log.Printf("Running cp command: %s", cp)
-	err = cpCmd.Run()
+	fileDestination := fmt.Sprintf("%s/%s", c.ContainerName, dst)
+	pushCommand := fmt.Sprintf("lxc file push --debug -pr %s %s", src, fileDestination)
+	log.Printf(pushCommand)
+	cp, err := c.CmdWrapper(pushCommand)
 	if err != nil {
 		log.Printf("Error running cp command: %s", err)
 		return err
 	}
 
-	err = tarCmd.Wait()
+	cpCmd := ShellCommand(cp)
+
+	log.Printf("Running cp command: %s", cp)
+	err = cpCmd.Run()
 	if err != nil {
-		log.Printf("Error running tar command: %s", err)
+		log.Printf("Error running cp command: %s", err)
 		return err
 	}
 

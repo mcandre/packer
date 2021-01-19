@@ -4,22 +4,23 @@ import (
 	"context"
 	"fmt"
 
+	"github.com/hashicorp/packer-plugin-sdk/multistep"
+	packersdk "github.com/hashicorp/packer-plugin-sdk/packer"
 	vboxcommon "github.com/hashicorp/packer/builder/virtualbox/common"
-	"github.com/hashicorp/packer/helper/multistep"
-	"github.com/hashicorp/packer/packer"
 )
 
 // This step imports an OVF VM into VirtualBox.
 type StepImport struct {
-	Name        string
-	ImportFlags []string
+	Name           string
+	ImportFlags    []string
+	KeepRegistered bool
 
 	vmName string
 }
 
-func (s *StepImport) Run(_ context.Context, state multistep.StateBag) multistep.StepAction {
+func (s *StepImport) Run(ctx context.Context, state multistep.StateBag) multistep.StepAction {
 	driver := state.Get("driver").(vboxcommon.Driver)
-	ui := state.Get("ui").(packer.Ui)
+	ui := state.Get("ui").(packersdk.Ui)
 	vmPath := state.Get("vm_path").(string)
 
 	ui.Say(fmt.Sprintf("Importing VM: %s", vmPath))
@@ -41,12 +42,11 @@ func (s *StepImport) Cleanup(state multistep.StateBag) {
 	}
 
 	driver := state.Get("driver").(vboxcommon.Driver)
-	ui := state.Get("ui").(packer.Ui)
-	config := state.Get("config").(*Config)
+	ui := state.Get("ui").(packersdk.Ui)
 
 	_, cancelled := state.GetOk(multistep.StateCancelled)
 	_, halted := state.GetOk(multistep.StateHalted)
-	if (config.KeepRegistered) && (!cancelled && !halted) {
+	if (s.KeepRegistered) && (!cancelled && !halted) {
 		ui.Say("Keeping virtual machine registered with VirtualBox host (keep_registered = true)")
 		return
 	}

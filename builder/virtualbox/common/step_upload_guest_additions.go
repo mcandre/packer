@@ -6,9 +6,9 @@ import (
 	"log"
 	"os"
 
-	"github.com/hashicorp/packer/helper/multistep"
-	"github.com/hashicorp/packer/packer"
-	"github.com/hashicorp/packer/template/interpolate"
+	"github.com/hashicorp/packer-plugin-sdk/multistep"
+	packersdk "github.com/hashicorp/packer-plugin-sdk/packer"
+	"github.com/hashicorp/packer-plugin-sdk/template/interpolate"
 )
 
 type guestAdditionsPathTemplate struct {
@@ -22,10 +22,10 @@ type StepUploadGuestAdditions struct {
 	Ctx                interpolate.Context
 }
 
-func (s *StepUploadGuestAdditions) Run(_ context.Context, state multistep.StateBag) multistep.StepAction {
-	comm := state.Get("communicator").(packer.Communicator)
+func (s *StepUploadGuestAdditions) Run(ctx context.Context, state multistep.StateBag) multistep.StepAction {
+	comm := state.Get("communicator").(packersdk.Communicator)
 	driver := state.Get("driver").(Driver)
-	ui := state.Get("ui").(packer.Ui)
+	ui := state.Get("ui").(packersdk.Ui)
 
 	// If we're attaching then don't do this, since we attached.
 	if s.GuestAdditionsMode != GuestAdditionsModeUpload {

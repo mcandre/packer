@@ -1,16 +1,22 @@
+//go:generate mapstructure-to-hcl2 -type Config
+
 package dockerpush
 
 import (
+	"context"
 	"fmt"
 
+	"github.com/hashicorp/hcl/v2/hcldec"
+	"github.com/hashicorp/packer-plugin-sdk/common"
+	packersdk "github.com/hashicorp/packer-plugin-sdk/packer"
+	"github.com/hashicorp/packer-plugin-sdk/template/config"
+	"github.com/hashicorp/packer-plugin-sdk/template/interpolate"
 	"github.com/hashicorp/packer/builder/docker"
-	"github.com/hashicorp/packer/common"
-	"github.com/hashicorp/packer/helper/config"
-	"github.com/hashicorp/packer/packer"
-	"github.com/hashicorp/packer/post-processor/docker-import"
-	"github.com/hashicorp/packer/post-processor/docker-tag"
-	"github.com/hashicorp/packer/template/interpolate"
+	dockerimport "github.com/hashicorp/packer/post-processor/docker-import"
+	dockertag "github.com/hashicorp/packer/post-processor/docker-tag"
 )
+
+const BuilderIdImport = "packer.post-processor.docker-import"
 
 type Config struct {
 	common.PackerConfig `mapstructure:",squash"`
@@ -31,8 +37,11 @@ type PostProcessor struct {
 	config Config
 }
 
+func (p *PostProcessor) ConfigSpec() hcldec.ObjectSpec { return p.config.FlatMapstructure().HCL2Spec() }
+
 func (p *PostProcessor) Configure(raws ...interface{}) error {
 	err := config.Decode(&p.config, &config.DecodeOpts{
+		PluginType:         BuilderIdImport,
 		Interpolate:        true,
 		InterpolateContext: &p.config.ctx,
 		InterpolateFilter: &interpolate.RenderFilter{
@@ -49,13 +58,13 @@ func (p *PostProcessor) Configure(raws ...interface{}) error {
 	return nil
 }
 
-func (p *PostProcessor) PostProcess(ui packer.Ui, artifact packer.Artifact) (packer.Artifact, bool, error) {
+func (p *PostProcessor) PostProcess(ctx context.Context, ui packersdk.Ui, artifact packersdk.Artifact) (packersdk.Artifact, bool, bool, error) {
 	if artifact.BuilderId() != dockerimport.BuilderId &&
 		artifact.BuilderId() != dockertag.BuilderId {
 		err := fmt.Errorf(
 			"Unknown artifact type: %s\nCan only import from docker-import and docker-tag artifacts.",
 			artifact.BuilderId())
-		return nil, false, err
+		return nil, false, false, err
 	}
 
 	driver := p.Driver
@@ -69,7 +78,7 @@ func (p *PostProcessor) PostProcess(ui packer.Ui, artifact packer.Artifact) (pac
 
 		username, password, err := p.config.EcrGetLogin(p.config.LoginServer)
 		if err != nil {
-			return nil, false, err
+			return nil, false, false, err
 		}
 
 		p.config.LoginUsername = username
@@ -83,7 +92,7 @@ func (p *PostProcessor) PostProcess(ui packer.Ui, artifact packer.Artifact) (pac
 			p.config.LoginUsername,
 			p.config.LoginPassword)
 		if err != nil {
-			return nil, false, fmt.Errorf(
+			return nil, false, false, fmt.Errorf(
 				"Error logging in to Docker: %s", err)
 		}
 
@@ -95,13 +104,35 @@ func (p *PostProcessor) PostProcess(ui packer.Ui, artifact packer.Artifact) (pac
 		}()
 	}
 
-	// Get the name.
-	name := artifact.Id()
-
-	ui.Message("Pushing: " + name)
-	if err := driver.Push(name); err != nil {
-		return nil, false, err
+	var tags []string
+	switch t := artifact.State("docker_tags").(type) {
+	case []string:
+		tags = t
+	case []interface{}:
+		for _, name := range t {
+			if n, ok := name.(string); ok {
+				tags = append(tags, n)
+			}
+		}
 	}
 
-	return nil, false, nil
+	names := []string{artifact.Id()}
+	names = append(names, tags...)
+
+	// Get the name.
+	for _, name := range names {
+		ui.Message("Pushing: " + name)
+		if err := driver.Push(name); err != nil {
+			return nil, false, false, err
+		}
+	}
+
+	artifact = &docker.ImportArtifact{
+		BuilderIdValue: BuilderIdImport,
+		Driver:         driver,
+		IdValue:        names[0],
+		StateData:      map[string]interface{}{"docker_tags": tags},
+	}
+
+	return artifact, true, false, nil
 }

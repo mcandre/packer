@@ -9,7 +9,7 @@ import (
 	"path/filepath"
 	"strings"
 
-	"github.com/hashicorp/packer/helper/multistep"
+	"github.com/hashicorp/packer-plugin-sdk/multistep"
 )
 
 // Player5Driver is a driver that can run VMware Player 5 on Linux.
@@ -25,7 +25,13 @@ type Player5Driver struct {
 	SSHConfig *SSHConfig
 }
 
-func (d *Player5Driver) Clone(dst, src string) error {
+func NewPlayer5Driver(config *SSHConfig) Driver {
+	return &Player5Driver{
+		SSHConfig: config,
+	}
+}
+
+func (d *Player5Driver) Clone(dst, src string, linked bool) error {
 	return errors.New("Cloning is not supported with VMWare Player version 5. Please use VMWare Player version 6, or greater.")
 }
 
@@ -201,14 +207,9 @@ func (d *Player5Driver) Verify() error {
 		if _, err := os.Stat(pathNetmap); err != nil {
 			return nil, fmt.Errorf("Could not find netmap conf file: %s", pathNetmap)
 		}
+		log.Printf("Located networkmapper configuration file using Player: %s", pathNetmap)
 
-		fd, err := os.Open(pathNetmap)
-		if err != nil {
-			return nil, err
-		}
-		defer fd.Close()
-
-		return ReadNetworkMap(fd)
+		return ReadNetmapConfig(pathNetmap)
 	}
 	return nil
 }
